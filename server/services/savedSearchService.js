@@ -31,30 +31,37 @@ const matchesSavedSearch = (listing, savedSearch) => {
 const notifyMatchingSavedSearchesForListing = (listing) => {
   if (!listing) return [];
 
-  const { getAllSavedSearches, createNotification, state } = getStore();
-  const notifications = [];
-  for (const savedSearch of getAllSavedSearches()) {
-    if (!matchesSavedSearch(listing, savedSearch)) continue;
-    if (savedSearch.userId === listing.sellerId) continue;
+  const store = getStore();
+  const dispatch = (savedSearch) => store.createNotification({
+    userId: savedSearch.userId,
+    type: 'NEW_MATCHING_LISTING',
+    message: `A new listing matched your saved search for "${savedSearch.name || 'saved search'}": ${listing.title}.`,
+    relatedListingId: listing.id,
+    relatedUserId: listing.sellerId,
+    dedupeKey: `saved-search:${savedSearch.id}:${listing.id}`,
+  });
 
-    const dedupeKey = `saved-search:${savedSearch.id}:${listing.id}`;
-    if (state.notifications.some((notification) => notification.dedupeKey === dedupeKey)) {
-      continue;
+  if (!store.isDatabaseConnected()) {
+    const notifications = [];
+    for (const savedSearch of store.getAllSavedSearches()) {
+      if (!matchesSavedSearch(listing, savedSearch) || savedSearch.userId === listing.sellerId) continue;
+      const dedupeKey = `saved-search:${savedSearch.id}:${listing.id}`;
+      if (store.state.notifications.some((notification) => notification.dedupeKey === dedupeKey)) continue;
+      const notification = dispatch(savedSearch);
+      if (notification) notifications.push(notification);
     }
-
-    const notification = createNotification({
-      userId: savedSearch.userId,
-      type: 'NEW_MATCHING_LISTING',
-      message: `A new listing matched your saved search for "${savedSearch.name || 'saved search'}": ${listing.title}.`,
-      relatedListingId: listing.id,
-      relatedUserId: listing.sellerId,
-      dedupeKey,
-    });
-
-    if (notification) notifications.push(notification);
+    return notifications;
   }
 
-  return notifications;
+  return store.getAllSavedSearches().then(async (savedSearches) => {
+    const notifications = [];
+    for (const savedSearch of savedSearches) {
+      if (!matchesSavedSearch(listing, savedSearch) || savedSearch.userId === listing.sellerId) continue;
+      const notification = await dispatch(savedSearch);
+      if (notification) notifications.push(notification);
+    }
+    return notifications;
+  });
 };
 
 const buildSavedSearchFilters = (payload = {}) => ({

@@ -2,7 +2,6 @@ const express = require('express');
 const { getAllListings, getListingById, createListing, updateListing, getUserById, createNotification } = require('../store');
 const { sanitizeListing, authMiddleware } = require('../utils');
 const { closeExpiredAuctions } = require('../services/auctionService');
-const { notifyMatchingSavedSearchesForListing } = require('../services/savedSearchService');
 
 const router = express.Router();
 
@@ -16,9 +15,9 @@ const normalizeFilters = (req) => ({
   sort: req.query.sort || 'newest',
 });
 
-router.get('/', (req, res) => {
-  const rawListings = closeExpiredAuctions();
-  let listings = rawListings.length ? getAllListings().filter((listing) => rawListings.includes(listing.id) || true) : getAllListings();
+router.get('/', async (req, res) => {
+  await closeExpiredAuctions();
+  let listings = await getAllListings();
 
   const { q, category, condition, minPrice, maxPrice, closingSoon, sort } = normalizeFilters(req);
 
@@ -47,32 +46,32 @@ router.get('/', (req, res) => {
       listings.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   }
 
-  const response = listings.map((listing) => {
-    const seller = getUserById(listing.sellerId);
+  const response = await Promise.all(listings.map(async (listing) => {
+    const seller = await getUserById(listing.sellerId);
     return sanitizeListing(listing, seller);
-  });
+  }));
 
   return res.json({ listings: response });
 });
 
-router.get('/:id', (req, res) => {
-  const listing = getListingById(req.params.id);
+router.get('/:id', async (req, res) => {
+  const listing = await getListingById(req.params.id);
   if (!listing) {
     return res.status(404).json({ message: 'Listing not found.' });
   }
 
-  const seller = getUserById(listing.sellerId);
+  const seller = await getUserById(listing.sellerId);
   return res.json({ listing: sanitizeListing(listing, seller) });
 });
 
-router.post('/', authMiddleware, (req, res) => {
+router.post('/', authMiddleware, async (req, res) => {
   const { title, category, description, condition, imageUrls, startingPrice, minimumIncrement, closingAt } = req.body || {};
 
   if (!title || !category || !description || !condition || !startingPrice || !minimumIncrement || !closingAt) {
     return res.status(400).json({ message: 'Please fill in all required listing fields.' });
   }
 
-  const listing = createListing({
+  const listing = await createListing({
     sellerId: req.user.id,
     title: String(title).trim(),
     category: String(category).trim(),
@@ -85,20 +84,18 @@ router.post('/', authMiddleware, (req, res) => {
     status: 'ACTIVE',
   });
 
-  createNotification({
+  await createNotification({
     userId: req.user.id,
     type: 'LISTING_CREATED',
     message: `Your listing "${title}" is live on CampusBid.`,
     relatedListingId: listing.id,
   });
 
-  notifyMatchingSavedSearchesForListing(listing);
-
   return res.status(201).json({ listing: sanitizeListing(listing, req.user) });
 });
 
-router.put('/:id', authMiddleware, (req, res) => {
-  const listing = getListingById(req.params.id);
+router.put('/:id', authMiddleware, async (req, res) => {
+  const listing = await getListingById(req.params.id);
   if (!listing) {
     return res.status(404).json({ message: 'Listing not found.' });
   }
@@ -122,13 +119,12 @@ router.put('/:id', authMiddleware, (req, res) => {
     closingAt: req.body.closingAt || listing.closingAt,
   };
 
-  const updated = updateListing(listing.id, updates);
-  notifyMatchingSavedSearchesForListing(updated);
+  const updated = await updateListing(listing.id, updates);
   return res.json({ listing: sanitizeListing(updated, req.user) });
 });
 
-router.delete('/:id', authMiddleware, (req, res) => {
-  const listing = getListingById(req.params.id);
+router.delete('/:id', authMiddleware, async (req, res) => {
+  const listing = await getListingById(req.params.id);
   if (!listing) {
     return res.status(404).json({ message: 'Listing not found.' });
   }
@@ -141,8 +137,8 @@ router.delete('/:id', authMiddleware, (req, res) => {
     return res.status(400).json({ message: 'This listing cannot be cancelled at this stage.' });
   }
 
-  updateListing(listing.id, { status: 'CANCELLED' });
-  createNotification({
+  await updateListing(listing.id, { status: 'CANCELLED' });
+  await createNotification({
     userId: req.user.id,
     type: 'LISTING_CANCELLED',
     message: `Your auction "${listing.title}" was cancelled.`,

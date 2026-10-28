@@ -7,7 +7,7 @@ const router = express.Router();
 
 router.post('/:id/bid', authMiddleware, async (req, res) => {
   try {
-    const listing = getListingById(req.params.id);
+    const listing = await getListingById(req.params.id);
     if (!listing) {
       return res.status(404).json({ message: 'Listing not found.' });
     }

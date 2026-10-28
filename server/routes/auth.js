@@ -6,7 +6,7 @@ const { sanitizeUser, authMiddleware } = require('../utils');
 
 const router = express.Router();
 
-router.post('/register', async (req, res) => {
+router.post('/register', async (req, res, next) => {
   const { name, email, password } = req.body || {};
   const normalizedEmail = String(email || '').trim().toLowerCase();
 
@@ -22,15 +22,19 @@ router.post('/register', async (req, res) => {
     return res.status(400).json({ message: 'Password must be at least 6 characters long.' });
   }
 
-  if (getUserByEmail(normalizedEmail)) {
-    return res.status(409).json({ message: 'An account with that email already exists.' });
+  try {
+    if (await getUserByEmail(normalizedEmail)) {
+      return res.status(409).json({ message: 'An account with that email already exists.' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const user = await createUser({ name, email: normalizedEmail, passwordHash });
+    const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET || 'campusbidding-secret', { expiresIn: '7d' });
+    return res.status(201).json({ token, user: sanitizeUser(user) });
+  } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ message: 'An account with that email already exists.' });
+    return next(error);
   }
-
-  const passwordHash = await bcrypt.hash(password, 10);
-  const user = createUser({ name, email: normalizedEmail, passwordHash });
-  const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET || 'campusbidding-secret', { expiresIn: '7d' });
-
-  return res.status(201).json({ token, user: sanitizeUser(user) });
 });
 
 router.post('/login', async (req, res) => {
@@ -41,7 +45,7 @@ router.post('/login', async (req, res) => {
     return res.status(400).json({ message: 'Email and password are required.' });
   }
 
-  const user = getUserByEmail(normalizedEmail);
+  const user = await getUserByEmail(normalizedEmail);
   if (!user) {
     return res.status(401).json({ message: 'Invalid email or password.' });
   }
@@ -55,8 +59,8 @@ router.post('/login', async (req, res) => {
   return res.json({ token, user: sanitizeUser(user) });
 });
 
-router.get('/me', authMiddleware, (req, res) => {
-  const user = getUserById(req.user.id);
+router.get('/me', authMiddleware, async (req, res) => {
+  const user = await getUserById(req.user.id);
   return res.json({ user: sanitizeUser(user) });
 });
 

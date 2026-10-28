@@ -140,8 +140,8 @@ describe('CampusBid API', () => {
       .send({ amount: 5200 });
     expect(bidResponse.status).toBe(400);
 
-    const firstClosure = closeExpiredAuctions();
-    const secondClosure = closeExpiredAuctions();
+    const firstClosure = await closeExpiredAuctions();
+    const secondClosure = await closeExpiredAuctions();
     expect(firstClosure.length).toBeGreaterThanOrEqual(0);
     expect(secondClosure.length).toBeGreaterThanOrEqual(0);
 

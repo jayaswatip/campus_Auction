@@ -232,10 +232,9 @@ const formatMoney = (value) => `₹${Number(value || 0).toLocaleString('en-IN')}
 const createAssistantSearchResult = async ({ query, userId = null } = {}) => {
   const targetQuery = typeof query === 'string' ? query : '';
   const filters = deriveSearchFilters(targetQuery);
-  const listings = applyStructuredFilters(getAllListings(), filters);
+  const listings = applyStructuredFilters(await getAllListings(), filters);
   const safeResults = listings.map((listing) => {
-    const listingRecord = getListingById(listing.id);
-    return sanitizeListing(listing, listingRecord?.seller ? { ...listingRecord.seller } : null);
+    return sanitizeListing(listing, null);
   });
 
   const response = {
@@ -279,7 +278,7 @@ const getAiProviderAvailability = () => ({
 });
 
 const executeAiBid = async ({ listingId, buyerId, proposedAmount, budgetLimit, confirmed = false }) => {
-  const listing = getListingById(listingId);
+  const listing = await getListingById(listingId);
   if (!listing) {
     const error = new Error('Listing not found.');
     error.statusCode = 404;

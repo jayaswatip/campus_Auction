@@ -10,7 +10,7 @@ const sanitizeText = (value) => {
     .trim();
 };
 
-const authMiddleware = (req, res, next) => {
+const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
 
@@ -18,18 +18,20 @@ const authMiddleware = (req, res, next) => {
     return res.status(401).json({ message: 'Authentication required.' });
   }
 
+  let decoded;
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'campusbidding-secret');
-    const user = getUserById(decoded.userId);
-
-    if (!user) {
-      return res.status(401).json({ message: 'User session is invalid.' });
-    }
-
-    req.user = user;
-    next();
-  } catch (error) {
+    decoded = jwt.verify(token, process.env.JWT_SECRET || 'campusbidding-secret');
+  } catch {
     return res.status(401).json({ message: 'Token is invalid or expired.' });
+  }
+
+  try {
+    const user = await getUserById(decoded.userId);
+    if (!user) return res.status(401).json({ message: 'User session is invalid.' });
+    req.user = user;
+    return next();
+  } catch (error) {
+    return next(error);
   }
 };
 

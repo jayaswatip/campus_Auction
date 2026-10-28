@@ -10,8 +10,8 @@ const {
 
 const router = express.Router();
 
-const ensureListingAccess = (req) => {
-  const listing = getListingById(req.params.id);
+const ensureListingAccess = async (req) => {
+  const listing = await getListingById(req.params.id);
   if (!listing) {
     const error = new Error('Listing not found.');
     error.statusCode = 404;
@@ -27,10 +27,10 @@ const ensureListingAccess = (req) => {
   return listing;
 };
 
-router.get('/:id/auto-bid', authMiddleware, (req, res) => {
+router.get('/:id/auto-bid', authMiddleware, async (req, res) => {
   try {
-    const listing = ensureListingAccess(req);
-    const instruction = getAutoBidInstruction({ listingId: listing.id, buyerId: req.user.id });
+    const listing = await ensureListingAccess(req);
+    const instruction = await getAutoBidInstruction({ listingId: listing.id, buyerId: req.user.id });
     return res.json({ instruction });
   } catch (error) {
     const status = error.statusCode || 500;
@@ -38,10 +38,10 @@ router.get('/:id/auto-bid', authMiddleware, (req, res) => {
   }
 });
 
-router.get('/:id/auto-bids', authMiddleware, (req, res) => {
+router.get('/:id/auto-bids', authMiddleware, async (req, res) => {
   try {
-    const listing = ensureListingAccess(req);
-    const instruction = getAutoBidInstruction({ listingId: listing.id, buyerId: req.user.id });
+    const listing = await ensureListingAccess(req);
+    const instruction = await getAutoBidInstruction({ listingId: listing.id, buyerId: req.user.id });
     return res.json({ instruction });
   } catch (error) {
     const status = error.statusCode || 500;
@@ -49,11 +49,11 @@ router.get('/:id/auto-bids', authMiddleware, (req, res) => {
   }
 });
 
-router.post('/:id/auto-bid', authMiddleware, (req, res) => {
+router.post('/:id/auto-bid', authMiddleware, async (req, res) => {
   const { maxAmount, confirmed = false, active = true } = req.body || {};
   try {
-    const listing = ensureListingAccess(req);
-    const instruction = createAutoBidInstruction({
+    const listing = await ensureListingAccess(req);
+    const instruction = await createAutoBidInstruction({
       listingId: listing.id,
       buyerId: req.user.id,
       maxAmount,
@@ -67,11 +67,11 @@ router.post('/:id/auto-bid', authMiddleware, (req, res) => {
   }
 });
 
-router.post('/:id/auto-bids', authMiddleware, (req, res) => {
+router.post('/:id/auto-bids', authMiddleware, async (req, res) => {
   const { maxAmount, confirmed = false, active = true } = req.body || {};
   try {
-    const listing = ensureListingAccess(req);
-    const instruction = createAutoBidInstruction({
+    const listing = await ensureListingAccess(req);
+    const instruction = await createAutoBidInstruction({
       listingId: listing.id,
       buyerId: req.user.id,
       maxAmount,
@@ -85,11 +85,11 @@ router.post('/:id/auto-bids', authMiddleware, (req, res) => {
   }
 });
 
-router.patch('/:id/auto-bid', authMiddleware, (req, res) => {
+router.patch('/:id/auto-bid', authMiddleware, async (req, res) => {
   const { maxAmount, active, confirmed } = req.body || {};
   try {
-    const listing = ensureListingAccess(req);
-    const instruction = updateAutoBidInstruction({
+    const listing = await ensureListingAccess(req);
+    const instruction = await updateAutoBidInstruction({
       listingId: listing.id,
       buyerId: req.user.id,
       maxAmount,
@@ -103,11 +103,11 @@ router.patch('/:id/auto-bid', authMiddleware, (req, res) => {
   }
 });
 
-router.patch('/:id/auto-bids', authMiddleware, (req, res) => {
+router.patch('/:id/auto-bids', authMiddleware, async (req, res) => {
   const { maxAmount, active, confirmed } = req.body || {};
   try {
-    const listing = ensureListingAccess(req);
-    const instruction = updateAutoBidInstruction({
+    const listing = await ensureListingAccess(req);
+    const instruction = await updateAutoBidInstruction({
       listingId: listing.id,
       buyerId: req.user.id,
       maxAmount,
@@ -121,10 +121,10 @@ router.patch('/:id/auto-bids', authMiddleware, (req, res) => {
   }
 });
 
-router.delete('/:id/auto-bid', authMiddleware, (req, res) => {
+router.delete('/:id/auto-bid', authMiddleware, async (req, res) => {
   try {
-    const listing = ensureListingAccess(req);
-    const instruction = deactivateAutoBidInstruction({ listingId: listing.id, buyerId: req.user.id });
+    const listing = await ensureListingAccess(req);
+    const instruction = await deactivateAutoBidInstruction({ listingId: listing.id, buyerId: req.user.id });
     return res.json({ instruction });
   } catch (error) {
     const status = error.statusCode || 500;
@@ -132,10 +132,10 @@ router.delete('/:id/auto-bid', authMiddleware, (req, res) => {
   }
 });
 
-router.delete('/:id/auto-bids', authMiddleware, (req, res) => {
+router.delete('/:id/auto-bids', authMiddleware, async (req, res) => {
   try {
-    const listing = ensureListingAccess(req);
-    const instruction = deactivateAutoBidInstruction({ listingId: listing.id, buyerId: req.user.id });
+    const listing = await ensureListingAccess(req);
+    const instruction = await deactivateAutoBidInstruction({ listingId: listing.id, buyerId: req.user.id });
     return res.json({ instruction });
   } catch (error) {
     const status = error.statusCode || 500;

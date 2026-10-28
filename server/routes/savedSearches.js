@@ -19,12 +19,12 @@ const ensureOwner = (userId, savedSearch) => {
   }
 };
 
-router.get('/', authMiddleware, (req, res) => {
-  const savedSearches = getSavedSearchesForUser(req.user.id);
+router.get('/', authMiddleware, async (req, res) => {
+  const savedSearches = await getSavedSearchesForUser(req.user.id);
   return res.json({ savedSearches });
 });
 
-router.post('/', authMiddleware, (req, res) => {
+router.post('/', authMiddleware, async (req, res) => {
   try {
     const payload = req.body || {};
     const name = String(payload.name || 'Saved search').trim() || 'Saved search';
@@ -36,7 +36,7 @@ router.post('/', authMiddleware, (req, res) => {
       throw error;
     }
 
-    const savedSearch = createSavedSearch({
+    const savedSearch = await createSavedSearch({
       userId: req.user.id,
       name,
       filters,
@@ -49,9 +49,9 @@ router.post('/', authMiddleware, (req, res) => {
   }
 });
 
-router.put('/:id', authMiddleware, (req, res) => {
+router.put('/:id', authMiddleware, async (req, res) => {
   try {
-    const savedSearch = getSavedSearchById(req.params.id);
+    const savedSearch = await getSavedSearchById(req.params.id);
     ensureOwner(req.user.id, savedSearch);
 
     const payload = req.body || {};
@@ -60,7 +60,7 @@ router.put('/:id', authMiddleware, (req, res) => {
       ...(payload.filters || payload),
     });
 
-    const updated = updateSavedSearch(savedSearch.id, {
+    const updated = await updateSavedSearch(savedSearch.id, {
       name: payload.name ? String(payload.name).trim() || savedSearch.name : savedSearch.name,
       filters: nextFilters,
     });
@@ -72,12 +72,12 @@ router.put('/:id', authMiddleware, (req, res) => {
   }
 });
 
-router.delete('/:id', authMiddleware, (req, res) => {
+router.delete('/:id', authMiddleware, async (req, res) => {
   try {
-    const savedSearch = getSavedSearchById(req.params.id);
+    const savedSearch = await getSavedSearchById(req.params.id);
     ensureOwner(req.user.id, savedSearch);
 
-    const deleted = deleteSavedSearch(savedSearch.id);
+    const deleted = await deleteSavedSearch(savedSearch.id);
     return res.json({ savedSearch: deleted, message: 'Saved search deleted.' });
   } catch (error) {
     const status = error.statusCode || 500;

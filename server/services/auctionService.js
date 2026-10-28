@@ -1,4 +1,21 @@
-const { getListingById, updateListing, createNotification, createSale, getSaleByListingId, updateSale, createAutoBid, getAutoBidForListingAndBuyer, getAutoBidsForListing, updateAutoBid, deleteAutoBid } = require('../store');
+const {
+  getListingById,
+  getAllListings,
+  updateListing,
+  createNotification,
+  createSale,
+  getSaleByListingId,
+  updateSale,
+  createAutoBid,
+  getAutoBidForListingAndBuyer,
+  getAutoBidsForListing,
+  updateAutoBid,
+  deleteAutoBid,
+  isDatabaseConnected,
+  placeBidAtomically,
+  closeExpiredListingAtomically,
+  decideSaleAtomically,
+} = require('../store');
 
 const LAST_MINUTE_EXTENSION_WINDOW_MS = 30 * 1000;
 const LAST_MINUTE_EXTENSION_LENGTH_MS = 60 * 1000;
@@ -58,7 +75,8 @@ const withListingLock = async (listingId, callback) => {
     release = resolve;
   });
 
-  global.__campusBidLocks[key] = previous.then(() => next);
+  const queued = previous.then(() => next);
+  global.__campusBidLocks[key] = queued;
 
   await previous;
   try {
@@ -67,20 +85,20 @@ const withListingLock = async (listingId, callback) => {
     if (release) {
       release();
     }
-    delete global.__campusBidLocks[key];
+    if (global.__campusBidLocks[key] === queued) delete global.__campusBidLocks[key];
   }
 };
 
-const notifyAutoBidStatus = (listing, previousBidderId = null) => {
+const notifyAutoBidStatus = async (listing, previousBidderId = null) => {
   const currentBidderId = listing.currentBidderId;
   const currentBid = Number(listing.currentBid || 0);
 
-  for (const instruction of getAutoBidsForListing(listing.id)) {
+  for (const instruction of await getAutoBidsForListing(listing.id)) {
     if (!instruction.active || !instruction.confirmed) continue;
 
     const reachedLimit = currentBidderId === instruction.buyerId && currentBid >= Number(instruction.maxAmount || 0);
     if (reachedLimit) {
-      createNotification({
+      await createNotification({
         userId: instruction.buyerId,
         type: 'AUTO_BID_LIMIT',
         message: `Your automatic bid for "${listing.title}" has reached its maximum authorized amount.`,
@@ -91,7 +109,7 @@ const notifyAutoBidStatus = (listing, previousBidderId = null) => {
 
     const wasOutbid = previousBidderId === instruction.buyerId && currentBidderId !== instruction.buyerId;
     if (wasOutbid) {
-      createNotification({
+      await createNotification({
         userId: instruction.buyerId,
         type: 'AUTO_BID_OUTBID',
         message: `You were outbid on "${listing.title}". Your automatic bidding instruction is still active.`,
@@ -103,7 +121,7 @@ const notifyAutoBidStatus = (listing, previousBidderId = null) => {
   }
 };
 
-const notifyClosingSoonIfDue = (listing) => {
+const notifyClosingSoonIfDue = async (listing) => {
   if (!listing || listing.status !== 'ACTIVE') return false;
 
   const remainingMs = getRemainingAuctionTime(listing, Date.now());
@@ -112,7 +130,7 @@ const notifyClosingSoonIfDue = (listing) => {
   const lastAlert = listing.lastClosingSoonNotifiedAt ? new Date(listing.lastClosingSoonNotifiedAt).getTime() : null;
   if (lastAlert && Date.now() - lastAlert < 30 * 60 * 1000) return false;
 
-  createNotification({
+  await createNotification({
     userId: listing.sellerId,
     type: 'AUCTION_CLOSING_SOON',
     message: `Your listing "${listing.title}" is closing soon. Consider reviewing the current bid and final terms.`,
@@ -121,7 +139,7 @@ const notifyClosingSoonIfDue = (listing) => {
   });
 
   if (listing.currentBidderId) {
-    createNotification({
+    await createNotification({
       userId: listing.currentBidderId,
       type: 'AUCTION_CLOSING_SOON',
       message: `The auction for "${listing.title}" is closing soon. Consider placing your final bid before the timer ends.`,
@@ -131,12 +149,12 @@ const notifyClosingSoonIfDue = (listing) => {
     });
   }
 
-  updateListing(listing.id, { lastClosingSoonNotifiedAt: new Date().toISOString() });
+  await updateListing(listing.id, { lastClosingSoonNotifiedAt: new Date().toISOString() });
   return true;
 };
 
-const resolveAutoBidsForListingLocked = (listingId) => {
-  const listing = getListingById(listingId);
+const resolveAutoBidsForListingLocked = async (listingId) => {
+  const listing = await getListingById(listingId);
   if (!listing || listing.status !== 'ACTIVE') {
     return null;
   }
@@ -146,7 +164,7 @@ const resolveAutoBidsForListingLocked = (listingId) => {
     return null;
   }
 
-  const activeInstructions = getAutoBidsForListing(listingId).filter((instruction) => instruction.active && instruction.confirmed);
+  const activeInstructions = (await getAutoBidsForListing(listingId)).filter((instruction) => instruction.active && instruction.confirmed);
   if (activeInstructions.length === 0) {
     return null;
   }
@@ -172,23 +190,45 @@ const resolveAutoBidsForListingLocked = (listingId) => {
   const previousBidderId = listing.currentBidderId;
   const nextAmount = Math.min(leaderMax, nextMinimumBid);
   const extensionTarget = getExtendedClosingAt(listing, now);
-  const updated = updateListing(listingId, {
-    currentBid: nextAmount,
-    currentBidderId: leader.buyerId,
-    closingAt: extensionTarget === listing.closingAt ? listing.closingAt : extensionTarget,
-    bidHistory: [
-      ...listing.bidHistory,
-      {
-        id: `bid_${Date.now()}`,
+  let updated;
+  let previousBidder = previousBidderId;
+  let extended = extensionTarget && extensionTarget !== listing.closingAt;
+  if (isDatabaseConnected()) {
+    try {
+      const commit = await placeBidAtomically({
+        listingId,
         bidderId: leader.buyerId,
         amount: nextAmount,
-        createdAt: new Date().toISOString(),
-      },
-    ],
-  });
+        now,
+        extensionWindowMs: LAST_MINUTE_EXTENSION_WINDOW_MS,
+        extensionLengthMs: LAST_MINUTE_EXTENSION_LENGTH_MS,
+      });
+      updated = commit.listing;
+      previousBidder = commit.previousBidderId;
+      extended = commit.extended;
+    } catch (error) {
+      if (error.statusCode === 400 && /Bid must be at least/.test(error.message)) return null;
+      throw error;
+    }
+  } else {
+    updated = updateListing(listingId, {
+      currentBid: nextAmount,
+      currentBidderId: leader.buyerId,
+      closingAt: extensionTarget === listing.closingAt ? listing.closingAt : extensionTarget,
+      bidHistory: [
+        ...listing.bidHistory,
+        {
+          id: `bid_${Date.now()}`,
+          bidderId: leader.buyerId,
+          amount: nextAmount,
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    });
+  }
 
-  if (extensionTarget && extensionTarget !== listing.closingAt) {
-    createNotification({
+  if (extended) {
+    await createNotification({
       userId: listing.sellerId,
       type: 'AUCTION_EXTENDED',
       message: `The auction for "${listing.title}" was extended by a final-minute automatic bid and will now close in 60 seconds.`,
@@ -197,7 +237,7 @@ const resolveAutoBidsForListingLocked = (listingId) => {
     });
   }
 
-  createNotification({
+  await createNotification({
     userId: listing.sellerId,
     type: 'NEW_BID',
     message: `A new automatic bid of ₹${nextAmount} was placed on ${listing.title}.`,
@@ -205,7 +245,7 @@ const resolveAutoBidsForListingLocked = (listingId) => {
     relatedUserId: leader.buyerId,
   });
 
-  notifyAutoBidStatus(updated, previousBidderId);
+  await notifyAutoBidStatus(updated, previousBidder);
   emitAuctionUpdate(updated);
   return updated;
 };
@@ -214,8 +254,8 @@ const resolveAutoBidsForListing = async (listingId) => {
   return withListingLock(listingId, async () => resolveAutoBidsForListingLocked(listingId));
 };
 
-const createAutoBidInstruction = ({ listingId, buyerId, maxAmount, confirmed = false, active = true }) => {
-  const listing = getListingById(listingId);
+const createAutoBidInstruction = async ({ listingId, buyerId, maxAmount, confirmed = false, active = true }) => {
+  const listing = await getListingById(listingId);
   if (!listing) {
     const error = new Error('Listing not found.');
     error.statusCode = 404;
@@ -241,7 +281,7 @@ const createAutoBidInstruction = ({ listingId, buyerId, maxAmount, confirmed = f
     throw error;
   }
 
-  const existing = getAutoBidForListingAndBuyer(listingId, buyerId);
+  const existing = await getAutoBidForListingAndBuyer(listingId, buyerId);
   if (existing) {
     if (active === true && confirmed !== true && existing.confirmed !== true) {
       const error = new Error('You must explicitly confirm automatic bidding before activating it.');
@@ -255,7 +295,7 @@ const createAutoBidInstruction = ({ listingId, buyerId, maxAmount, confirmed = f
     if (active === false) updates.active = false;
     if (active === true) updates.active = true;
     if (Object.keys(updates).length === 0) updates.confirmed = true;
-    const updated = updateAutoBid(existing.id, updates);
+    const updated = await updateAutoBid(existing.id, updates);
     return updated;
   }
 
@@ -265,7 +305,7 @@ const createAutoBidInstruction = ({ listingId, buyerId, maxAmount, confirmed = f
     throw error;
   }
 
-  const instruction = createAutoBid({
+  const instruction = await createAutoBid({
     listingId,
     buyerId,
     maxAmount: parsedMax,
@@ -276,8 +316,8 @@ const createAutoBidInstruction = ({ listingId, buyerId, maxAmount, confirmed = f
   return instruction;
 };
 
-const getAutoBidInstruction = ({ listingId, buyerId }) => {
-  const instruction = getAutoBidForListingAndBuyer(listingId, buyerId);
+const getAutoBidInstruction = async ({ listingId, buyerId }) => {
+  const instruction = await getAutoBidForListingAndBuyer(listingId, buyerId);
   if (!instruction) {
     return null;
   }
@@ -285,15 +325,15 @@ const getAutoBidInstruction = ({ listingId, buyerId }) => {
   return instruction;
 };
 
-const updateAutoBidInstruction = ({ listingId, buyerId, maxAmount, active, confirmed = false }) => {
-  const listing = getListingById(listingId);
+const updateAutoBidInstruction = async ({ listingId, buyerId, maxAmount, active, confirmed = false }) => {
+  const listing = await getListingById(listingId);
   if (!listing) {
     const error = new Error('Listing not found.');
     error.statusCode = 404;
     throw error;
   }
 
-  const instruction = getAutoBidForListingAndBuyer(listingId, buyerId);
+  const instruction = await getAutoBidForListingAndBuyer(listingId, buyerId);
   if (!instruction) {
     const error = new Error('Automatic bidding instruction not found.');
     error.statusCode = 404;
@@ -325,15 +365,15 @@ const updateAutoBidInstruction = ({ listingId, buyerId, maxAmount, active, confi
   return updateAutoBid(instruction.id, nextState);
 };
 
-const deactivateAutoBidInstruction = ({ listingId, buyerId }) => {
-  const listing = getListingById(listingId);
+const deactivateAutoBidInstruction = async ({ listingId, buyerId }) => {
+  const listing = await getListingById(listingId);
   if (!listing) {
     const error = new Error('Listing not found.');
     error.statusCode = 404;
     throw error;
   }
 
-  const instruction = getAutoBidForListingAndBuyer(listingId, buyerId);
+  const instruction = await getAutoBidForListingAndBuyer(listingId, buyerId);
   if (!instruction) {
     const error = new Error('Automatic bidding instruction not found.');
     error.statusCode = 404;
@@ -353,7 +393,7 @@ const processBid = async ({ listingId, bidderId, amount }) => {
   const bidValue = Number(amount);
 
   return withListingLock(listingId, async () => {
-    const listing = getListingById(listingId);
+    const listing = await getListingById(listingId);
     if (!listing) {
       const error = new Error('Listing not found.');
       error.statusCode = 404;
@@ -388,25 +428,42 @@ const processBid = async ({ listingId, bidderId, amount }) => {
       throw error;
     }
 
-    const previousBidderId = listing.currentBidderId;
-    const extensionTarget = getExtendedClosingAt(listing, now);
-    const updated = updateListing(listingId, {
-      currentBid: bidValue,
-      currentBidderId: bidderId,
-      closingAt: extensionTarget === listing.closingAt ? listing.closingAt : extensionTarget,
-      bidHistory: [
-        ...listing.bidHistory,
-        {
-          id: `bid_${Date.now()}`,
-          bidderId,
-          amount: bidValue,
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    });
+    let updated;
+    let previousBidderId = listing.currentBidderId;
+    let extensionApplied = false;
+    if (isDatabaseConnected()) {
+      const commit = await placeBidAtomically({
+        listingId,
+        bidderId,
+        amount: bidValue,
+        now,
+        extensionWindowMs: LAST_MINUTE_EXTENSION_WINDOW_MS,
+        extensionLengthMs: LAST_MINUTE_EXTENSION_LENGTH_MS,
+      });
+      updated = commit.listing;
+      previousBidderId = commit.previousBidderId;
+      extensionApplied = commit.extended;
+    } else {
+      const extensionTarget = getExtendedClosingAt(listing, now);
+      extensionApplied = extensionTarget && extensionTarget !== listing.closingAt;
+      updated = updateListing(listingId, {
+        currentBid: bidValue,
+        currentBidderId: bidderId,
+        closingAt: extensionApplied ? extensionTarget : listing.closingAt,
+        bidHistory: [
+          ...listing.bidHistory,
+          {
+            id: `bid_${Date.now()}`,
+            bidderId,
+            amount: bidValue,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      });
+    }
 
     if (previousBidderId && previousBidderId !== bidderId) {
-      createNotification({
+      await createNotification({
         userId: previousBidderId,
         type: 'HIGHER_BID',
         message: `A higher competing bid was placed on "${listing.title}".`,
@@ -416,8 +473,8 @@ const processBid = async ({ listingId, bidderId, amount }) => {
       });
     }
 
-    if (extensionTarget && extensionTarget !== listing.closingAt) {
-      createNotification({
+    if (extensionApplied) {
+      await createNotification({
         userId: listing.sellerId,
         type: 'AUCTION_EXTENDED',
         message: `The auction for "${listing.title}" was extended by a final-minute bid and will now close in 60 seconds.`,
@@ -428,7 +485,7 @@ const processBid = async ({ listingId, bidderId, amount }) => {
       emitAuctionUpdate(updated);
     }
 
-    createNotification({
+    await createNotification({
       userId: listing.sellerId,
       type: 'NEW_BID',
       message: `A new valid bid of ₹${bidValue} was placed on ${listing.title}.`,
@@ -437,101 +494,95 @@ const processBid = async ({ listingId, bidderId, amount }) => {
       dedupeKey: `new-bid:${listing.id}:${bidderId}:${bidValue}`,
     });
 
-    notifyAutoBidStatus(updated, previousBidderId);
+    await notifyAutoBidStatus(updated, previousBidderId);
     emitAuctionUpdate(updated);
 
-    return resolveAutoBidsForListingLocked(listingId) || updated;
+    return (await resolveAutoBidsForListingLocked(listingId)) || updated;
   });
 };
 
-const closeExpiredAuctions = () => {
+const closeExpiredAuctions = async () => {
   const now = Date.now();
-
   const affected = [];
-  const listings = require('../store').getAllListings();
+  const listings = await getAllListings();
 
-  listings.forEach((listing) => {
-    const lockKey = `listing:${listing.id}`;
-    if (global.__campusBidLocks && global.__campusBidLocks[lockKey]) {
-      return;
-    }
+  for (const candidate of listings) {
+    await withListingLock(candidate.id, async () => {
+      const listing = await getListingById(candidate.id);
+      if (!listing || listing.status !== 'ACTIVE') return;
+      await notifyClosingSoonIfDue(listing);
+      if (new Date(listing.closingAt).getTime() > now) return;
 
-    if (listing.status !== 'ACTIVE') return;
-    notifyClosingSoonIfDue(listing);
-    if (new Date(listing.closingAt).getTime() > now) return;
+      let closure;
+      if (isDatabaseConnected()) {
+        closure = await closeExpiredListingAtomically(candidate.id, new Date(now));
+      } else {
+        const existingSale = await getSaleByListingId(candidate.id);
+        if (existingSale) return;
+        const highestBid = listing.bidHistory.length
+          ? [...listing.bidHistory].sort((a, b) => Number(b.amount) - Number(a.amount))[0]
+          : null;
 
-    const existingSale = getSaleByListingId(listing.id);
-    if (existingSale && existingSale.status === 'PENDING_APPROVAL') {
-      return;
-    }
+        if (!highestBid) {
+          closure = { listing: await updateListing(candidate.id, { status: 'UNSOLD' }), sale: null, highestBid: null };
+        } else {
+          const sale = await createSale({
+            listingId: listing.id,
+            sellerId: listing.sellerId,
+            buyerId: highestBid.bidderId,
+            winningBidId: highestBid.id,
+            price: highestBid.amount,
+            status: 'PENDING_APPROVAL',
+          });
+          const updated = await updateListing(candidate.id, {
+            status: 'PENDING_APPROVAL',
+            provisionalWinnerId: highestBid.bidderId,
+            sellerDecision: 'pending',
+          });
+          closure = { listing: updated, sale, highestBid };
+        }
+      }
 
-    const highestBid = listing.bidHistory.length
-      ? [...listing.bidHistory].sort((a, b) => Number(b.amount) - Number(a.amount))[0]
-      : null;
+      if (!closure) return;
+      emitAuctionUpdate(closure.listing);
 
-    if (!highestBid) {
-      const updated = updateListing(listing.id, { status: 'UNSOLD' });
-      emitAuctionUpdate(updated);
-      createNotification({ userId: listing.sellerId, type: 'AUCTION_CLOSED', message: `Your listing "${listing.title}" closed without bids and is marked unsold.`, relatedListingId: listing.id, dedupeKey: `auction-closed:${listing.id}` });
-      affected.push(listing.id);
-      return;
-    }
+      if (!closure.highestBid) {
+        await createNotification({
+          userId: listing.sellerId,
+          type: 'AUCTION_CLOSED',
+          message: `Your listing "${listing.title}" closed without bids and is marked unsold.`,
+          relatedListingId: listing.id,
+          dedupeKey: `auction-closed:${listing.id}`,
+        });
+        affected.push(listing.id);
+        return;
+      }
 
-    if (existingSale) {
-      const updated = updateListing(listing.id, {
-        status: 'PENDING_APPROVAL',
-        provisionalWinnerId: highestBid.bidderId,
-        sellerDecision: 'pending',
+      const winningBid = closure.highestBid;
+      await createNotification({
+        userId: listing.sellerId,
+        type: 'PROVISIONAL_WIN',
+        message: `The provisional winning bid for "${listing.title}" is ₹${winningBid.amount}. Review and approve or reject it.`,
+        relatedListingId: listing.id,
+        relatedUserId: winningBid.bidderId,
+        dedupeKey: `provisional-win:seller:${listing.id}`,
       });
-      emitAuctionUpdate(updated);
-      affected.push({ listingId: listing.id, saleId: existingSale.id });
-      return;
-    }
-
-    const sale = createSale({
-      listingId: listing.id,
-      sellerId: listing.sellerId,
-      buyerId: highestBid.bidderId,
-      winningBidId: highestBid.id,
-      price: highestBid.amount,
-      status: 'PENDING_APPROVAL',
+      await createNotification({
+        userId: winningBid.bidderId,
+        type: 'PROVISIONAL_WIN',
+        message: `You are the provisional winner of "${listing.title}". Please wait for the seller's decision.`,
+        relatedListingId: listing.id,
+        relatedUserId: listing.sellerId,
+        dedupeKey: `provisional-win:buyer:${listing.id}:${winningBid.bidderId}`,
+      });
+      affected.push({ listingId: listing.id, saleId: closure.sale.id });
     });
-
-    const updated = updateListing(listing.id, {
-      status: 'PENDING_APPROVAL',
-      provisionalWinnerId: highestBid.bidderId,
-      sellerDecision: 'pending',
-    });
-    emitAuctionUpdate(updated);
-
-    notifyClosingSoonIfDue(listing);
-
-    createNotification({
-      userId: listing.sellerId,
-      type: 'PROVISIONAL_WIN',
-      message: `The provisional winning bid for "${listing.title}" is ₹${highestBid.amount}. Review and approve or reject it.`,
-      relatedListingId: listing.id,
-      relatedUserId: highestBid.bidderId,
-      dedupeKey: `provisional-win:seller:${listing.id}`,
-    });
-
-    createNotification({
-      userId: highestBid.bidderId,
-      type: 'PROVISIONAL_WIN',
-      message: `You are the provisional winner of "${listing.title}". Please wait for the seller's decision.`,
-      relatedListingId: listing.id,
-      relatedUserId: listing.sellerId,
-      dedupeKey: `provisional-win:buyer:${listing.id}:${highestBid.bidderId}`,
-    });
-
-    affected.push({ listingId: listing.id, saleId: sale.id });
-  });
-
+  }
   return affected;
 };
 
-const approveWinner = ({ listingId, sellerId, approved }) => {
-  const listing = getListingById(listingId);
+const approveWinnerLocked = async ({ listingId, sellerId, approved }) => {
+  const listing = await getListingById(listingId);
   if (!listing) {
     const error = new Error('Listing not found.');
     error.statusCode = 404;
@@ -550,24 +601,36 @@ const approveWinner = ({ listingId, sellerId, approved }) => {
     throw error;
   }
 
-  const sale = getSaleByListingId(listingId);
+  const sale = await getSaleByListingId(listingId);
   if (!sale) {
     const error = new Error('No provisional sale record exists for this listing.');
     error.statusCode = 404;
     throw error;
   }
 
-  const nextStatus = approved ? 'RESERVED' : 'REJECTED';
-  const updated = updateListing(listingId, {
-    status: approved ? 'RESERVED' : 'CANCELLED',
-    sellerDecision: approved ? 'approved' : 'rejected',
-  });
+  let updated;
+  let decidedSale;
+  if (isDatabaseConnected()) {
+    const result = await decideSaleAtomically({ listingId, sellerId, approved });
+    if (!result) {
+      const error = new Error('No provisional sale record exists for this listing.');
+      error.statusCode = 404;
+      throw error;
+    }
+    updated = result.listing;
+    decidedSale = result.sale;
+  } else {
+    const nextStatus = approved ? 'RESERVED' : 'REJECTED';
+    updated = await updateListing(listingId, {
+      status: approved ? 'RESERVED' : 'CANCELLED',
+      sellerDecision: approved ? 'approved' : 'rejected',
+    });
+    decidedSale = await updateSale(sale.id, { status: nextStatus });
+  }
   emitAuctionUpdate(updated);
 
-  updateSale(sale.id, { status: nextStatus });
-
   if (approved) {
-    createNotification({
+    await createNotification({
       userId: listing.provisionalWinnerId,
       type: 'SALE_APPROVED',
       message: `The seller approved your bid for "${listing.title}". Please complete the handover plan.`,
@@ -575,7 +638,7 @@ const approveWinner = ({ listingId, sellerId, approved }) => {
       relatedUserId: sellerId,
       dedupeKey: `sale-approved:${listing.id}:${listing.provisionalWinnerId}`,
     });
-    createNotification({
+    await createNotification({
       userId: sellerId,
       type: 'BID_ACCEPTED',
       message: `You accepted the winning bid for "${listing.title}".`,
@@ -584,7 +647,7 @@ const approveWinner = ({ listingId, sellerId, approved }) => {
       dedupeKey: `bid-accepted:${listing.id}:${sellerId}`,
     });
   } else {
-    createNotification({
+    await createNotification({
       userId: listing.provisionalWinnerId,
       type: 'SALE_REJECTED',
       message: `The seller rejected the provisional sale for "${listing.title}". The item remains available for new bids or review.`,
@@ -592,7 +655,7 @@ const approveWinner = ({ listingId, sellerId, approved }) => {
       relatedUserId: sellerId,
       dedupeKey: `sale-rejected:${listing.id}:${listing.provisionalWinnerId}`,
     });
-    createNotification({
+    await createNotification({
       userId: sellerId,
       type: 'BID_REJECTED',
       message: `You rejected the provisional bid for "${listing.title}".`,
@@ -602,8 +665,13 @@ const approveWinner = ({ listingId, sellerId, approved }) => {
     });
   }
 
-  return { listing: updated, sale };
+  return { listing: updated, sale: decidedSale };
 };
+
+const approveWinner = ({ listingId, sellerId, approved }) => withListingLock(
+  listingId,
+  () => approveWinnerLocked({ listingId, sellerId, approved })
+);
 
 module.exports = {
   LAST_MINUTE_EXTENSION_WINDOW_MS,
