@@ -2,6 +2,7 @@ const express = require('express');
 const { getAllListings, getListingById, createListing, updateListing, getUserById, createNotification } = require('../store');
 const { sanitizeListing, authMiddleware } = require('../utils');
 const { closeExpiredAuctions } = require('../services/auctionService');
+const { notifyMatchingSavedSearchesForListing } = require('../services/savedSearchService');
 
 const router = express.Router();
 
@@ -91,6 +92,8 @@ router.post('/', authMiddleware, (req, res) => {
     relatedListingId: listing.id,
   });
 
+  notifyMatchingSavedSearchesForListing(listing);
+
   return res.status(201).json({ listing: sanitizeListing(listing, req.user) });
 });
 
@@ -120,6 +123,7 @@ router.put('/:id', authMiddleware, (req, res) => {
   };
 
   const updated = updateListing(listing.id, updates);
+  notifyMatchingSavedSearchesForListing(updated);
   return res.json({ listing: sanitizeListing(updated, req.user) });
 });
 

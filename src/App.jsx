@@ -83,6 +83,7 @@ function App() {
           <Route path="/sell" element={token ? <CreateListingPage token={token} /> : <Navigate to="/login" replace />} />
           <Route path="/dashboard" element={token ? <DashboardPage token={token} /> : <Navigate to="/login" replace />} />
           <Route path="/seller" element={token ? <SellerManagementPage token={token} /> : <Navigate to="/login" replace />} />
+          <Route path="/saved-searches" element={token ? <SavedSearchesPage token={token} /> : <Navigate to="/login" replace />} />
           <Route path="/notifications" element={token ? <NotificationsPage token={token} /> : <Navigate to="/login" replace />} />
         </Routes>
       </main>
@@ -113,6 +114,9 @@ function Header({ user, notificationCount, onLogout }) {
           <NavLink to="/marketplace" className={navLinkClass}>Marketplace</NavLink>
           <NavLink to="/dashboard" className={navLinkClass}>Dashboard</NavLink>
           <NavLink to="/seller" className={navLinkClass}>Seller</NavLink>
+          {user ? (
+            <NavLink to="/saved-searches" className={navLinkClass}>Saved searches</NavLink>
+          ) : null}
           {user ? (
             <NavLink to="/notifications" className={navLinkClass}>
               <span className="inline-flex items-center gap-2">
@@ -557,26 +561,217 @@ function SellerManagementPage({ token }) {
 
 function NotificationsPage({ token }) {
   const [notifications, setNotifications] = useState([]);
+  const [permission, setPermission] = useState(() => (typeof window !== 'undefined' && 'Notification' in window ? Notification.permission : 'unsupported'));
+
+  const refreshNotifications = async () => {
+    try {
+      const payload = await fetchJson('/notifications', {}, token);
+      setNotifications(payload.notifications || []);
+    } catch {
+      setNotifications([]);
+    }
+  };
 
   useEffect(() => {
-    fetchJson('/notifications', {}, token)
-      .then((payload) => setNotifications(payload.notifications || []))
-      .catch(() => setNotifications([]));
+    refreshNotifications();
   }, [token]);
+
+  const markAllRead = async () => {
+    try {
+      await fetchJson('/notifications/read-all', { method: 'PATCH' }, token);
+      await refreshNotifications();
+    } catch {
+      // noop
+    }
+  };
+
+  const enableBrowserNotifications = async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      return;
+    }
+
+    const next = await Notification.requestPermission();
+    setPermission(next);
+    if (next === 'granted') {
+      new Notification('CampusBid alerts enabled', { body: 'You will now receive browser alerts for important activity.' });
+    }
+  };
+
+  const markOneRead = async (notificationId) => {
+    try {
+      await fetchJson(`/notifications/${notificationId}/read`, { method: 'PATCH' }, token);
+      await refreshNotifications();
+    } catch {
+      // noop
+    }
+  };
 
   return (
     <div className="space-y-6">
-      <h1 className="text-3xl font-bold tracking-tight text-slate-900">Notification center</h1>
+      <div className="flex flex-col gap-4 rounded-[30px] border border-slate-200 bg-white p-6 shadow-soft md:flex-row md:items-center md:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight text-slate-900">Notification center</h1>
+          <p className="mt-1 text-sm text-slate-500">Stay up to date without missing out on bids, approvals, and matching listings.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {typeof window !== 'undefined' && 'Notification' in window && permission !== 'denied' ? (
+            <button onClick={enableBrowserNotifications} className="rounded-full bg-brand-900 px-4 py-2 text-sm font-medium text-white">
+              {permission === 'granted' ? 'Browser alerts on' : 'Enable browser alerts'}
+            </button>
+          ) : null}
+          <button onClick={markAllRead} className="rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700">Mark all read</button>
+        </div>
+      </div>
+
       <div className="space-y-3">
         {notifications.length ? notifications.map((notification) => (
-          <div key={notification.id} className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-soft">
-            <div className="flex items-center justify-between gap-4">
-              <div className="font-semibold text-slate-900">{notification.type}</div>
-              <div className="text-xs text-slate-400">{new Date(notification.createdAt).toLocaleString()}</div>
+          <div key={notification.id} className={`rounded-[24px] border p-4 shadow-soft ${notification.read ? 'border-slate-200 bg-white' : 'border-brand-200 bg-brand-50'}`}>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="font-semibold text-slate-900">{notification.type}</div>
+                <div className="text-xs text-slate-400">{new Date(notification.createdAt).toLocaleString()}</div>
+              </div>
+              {!notification.read ? (
+                <button onClick={() => markOneRead(notification.id)} className="rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-slate-700">Mark read</button>
+              ) : null}
             </div>
             <p className="mt-2 text-sm text-slate-600">{notification.message}</p>
           </div>
         )) : <EmptyState text="No notifications yet." />}
+      </div>
+    </div>
+  );
+}
+
+function SavedSearchesPage({ token }) {
+  const [savedSearches, setSavedSearches] = useState([]);
+  const [form, setForm] = useState({
+    name: '',
+    query: '',
+    category: 'all',
+    condition: 'all',
+    minPrice: '',
+    maxPrice: '',
+    closingSoon: false,
+  });
+  const [error, setError] = useState('');
+
+  const refreshSavedSearches = async () => {
+    try {
+      const payload = await fetchJson('/saved-searches', {}, token);
+      setSavedSearches(payload.savedSearches || []);
+    } catch {
+      setSavedSearches([]);
+    }
+  };
+
+  useEffect(() => {
+    refreshSavedSearches();
+  }, [token]);
+
+  const submitSearch = async (event) => {
+    event.preventDefault();
+    setError('');
+
+    try {
+      const payload = {
+        name: form.name || 'Saved search',
+        query: form.query || '',
+        category: form.category === 'all' ? null : form.category,
+        condition: form.condition === 'all' ? null : form.condition,
+        minPrice: form.minPrice === '' ? null : Number(form.minPrice),
+        maxPrice: form.maxPrice === '' ? null : Number(form.maxPrice),
+        closingSoon: form.closingSoon,
+      };
+
+      await fetchJson('/saved-searches', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }, token);
+
+      setForm({
+        name: '',
+        query: '',
+        category: 'all',
+        condition: 'all',
+        minPrice: '',
+        maxPrice: '',
+        closingSoon: false,
+      });
+      await refreshSavedSearches();
+    } catch (apiError) {
+      setError(apiError.message);
+    }
+  };
+
+  const deleteSearch = async (id) => {
+    try {
+      await fetchJson(`/saved-searches/${id}`, { method: 'DELETE' }, token);
+      await refreshSavedSearches();
+    } catch {
+      // noop
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="rounded-[30px] border border-slate-200 bg-white p-6 shadow-soft">
+        <h1 className="text-3xl font-bold tracking-tight text-slate-900">Saved searches</h1>
+        <p className="mt-2 text-sm text-slate-500">Create alerts for the listings you care about most.</p>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+        <div className="rounded-[30px] border border-slate-200 bg-white p-6 shadow-soft">
+          <h2 className="text-xl font-bold text-slate-900">Save a new search</h2>
+          <form onSubmit={submitSearch} className="mt-5 space-y-4">
+            <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Search name" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none" />
+            <input value={form.query} onChange={(event) => setForm({ ...form, query: event.target.value })} placeholder="Keyword, item name, or topic" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none" />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <select value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm outline-none">
+                <option value="all">Any category</option>
+                {categories.map((category) => <option key={category} value={category}>{category}</option>)}
+              </select>
+              <select value={form.condition} onChange={(event) => setForm({ ...form, condition: event.target.value })} className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm outline-none">
+                <option value="all">Any condition</option>
+                <option value="Excellent">Excellent</option>
+                <option value="Good">Good</option>
+                <option value="Fair">Fair</option>
+              </select>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <input type="number" min="0" value={form.minPrice} onChange={(event) => setForm({ ...form, minPrice: event.target.value })} placeholder="Min price" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none" />
+              <input type="number" min="0" value={form.maxPrice} onChange={(event) => setForm({ ...form, maxPrice: event.target.value })} placeholder="Max price" className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none" />
+            </div>
+            <label className="flex items-center gap-3 text-sm text-slate-700">
+              <input type="checkbox" checked={form.closingSoon} onChange={(event) => setForm({ ...form, closingSoon: event.target.checked })} />
+              Notify me for items closing soon
+            </label>
+            {error ? <div className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div> : null}
+            <button type="submit" className="w-full rounded-xl bg-brand-900 px-4 py-3 font-semibold text-white">Save search</button>
+          </form>
+        </div>
+
+        <div className="rounded-[30px] border border-slate-200 bg-white p-6 shadow-soft">
+          <h2 className="text-xl font-bold text-slate-900">Your saved searches</h2>
+          <div className="mt-5 space-y-3">
+            {savedSearches.length ? savedSearches.map((savedSearch) => (
+              <div key={savedSearch.id} className="rounded-[24px] border border-slate-200 bg-slate-50 p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="font-semibold text-slate-900">{savedSearch.name}</div>
+                    <div className="mt-1 text-sm text-slate-500">{savedSearch.filters?.query || 'Any item'} · {savedSearch.filters?.category || 'Any category'} · {savedSearch.filters?.condition || 'Any condition'}</div>
+                  </div>
+                  <button onClick={() => deleteSearch(savedSearch.id)} className="rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-slate-700">Delete</button>
+                </div>
+                <div className="mt-3 text-xs text-slate-500">
+                  {savedSearch.filters?.minPrice ? `Min: ₹${savedSearch.filters.minPrice} ` : ''}
+                  {savedSearch.filters?.maxPrice ? `Max: ₹${savedSearch.filters.maxPrice}` : ''}
+                  {savedSearch.filters?.closingSoon ? ' · Closing soon' : ''}
+                </div>
+              </div>
+            )) : <EmptyState text="No saved searches yet." />}
+          </div>
+        </div>
       </div>
     </div>
   );

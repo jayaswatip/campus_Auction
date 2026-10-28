@@ -14,6 +14,8 @@ const autoBidRoutes = require('./routes/autoBids');
 const assistantRoutes = require('./routes/assistant');
 const notificationRoutes = require('./routes/notifications');
 const sellerRoutes = require('./routes/seller');
+const savedSearchRoutes = require('./routes/savedSearches');
+const { notifyMatchingSavedSearchesForListing } = require('./services/savedSearchService');
 
 const app = express();
 const server = http.createServer(app);
@@ -40,6 +42,7 @@ app.use('/api/listings', bidRoutes);
 app.use('/api/listings', autoBidRoutes);
 app.use('/api/assistant', assistantRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/saved-searches', savedSearchRoutes);
 app.use('/api/seller', sellerRoutes);
 
 app.get('/api/health', (req, res) => {
@@ -113,6 +116,13 @@ const auctionMonitor = setInterval(() => {
   }
 }, 15000);
 auctionMonitor.unref();
+
+const savedSearchMonitor = setInterval(() => {
+  getAllListings().forEach((listing) => {
+    notifyMatchingSavedSearchesForListing(listing);
+  });
+}, 60000);
+savedSearchMonitor.unref();
 
 app.locals.io = io;
 

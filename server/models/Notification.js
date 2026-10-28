@@ -8,6 +8,7 @@ const notificationSchema = new mongoose.Schema(
     relatedListingId: { type: String, default: null },
     relatedUserId: { type: String, default: null },
     read: { type: Boolean, default: false },
+    dedupeKey: { type: String, default: null, unique: true, sparse: true },
   },
   { timestamps: true }
 );

@@ -85,6 +85,7 @@ const notifyAutoBidStatus = (listing, previousBidderId = null) => {
         type: 'AUTO_BID_LIMIT',
         message: `Your automatic bid for "${listing.title}" has reached its maximum authorized amount.`,
         relatedListingId: listing.id,
+        dedupeKey: `auto-bid-limit:${listing.id}:${instruction.buyerId}`,
       });
     }
 
@@ -96,9 +97,42 @@ const notifyAutoBidStatus = (listing, previousBidderId = null) => {
         message: `You were outbid on "${listing.title}". Your automatic bidding instruction is still active.`,
         relatedListingId: listing.id,
         relatedUserId: currentBidderId,
+        dedupeKey: `auto-bid-outbid:${listing.id}:${instruction.buyerId}`,
       });
     }
   }
+};
+
+const notifyClosingSoonIfDue = (listing) => {
+  if (!listing || listing.status !== 'ACTIVE') return false;
+
+  const remainingMs = getRemainingAuctionTime(listing, Date.now());
+  if (remainingMs <= 0 || remainingMs > 60 * 60 * 1000) return false;
+
+  const lastAlert = listing.lastClosingSoonNotifiedAt ? new Date(listing.lastClosingSoonNotifiedAt).getTime() : null;
+  if (lastAlert && Date.now() - lastAlert < 30 * 60 * 1000) return false;
+
+  createNotification({
+    userId: listing.sellerId,
+    type: 'AUCTION_CLOSING_SOON',
+    message: `Your listing "${listing.title}" is closing soon. Consider reviewing the current bid and final terms.`,
+    relatedListingId: listing.id,
+    dedupeKey: `closing-soon:seller:${listing.id}`,
+  });
+
+  if (listing.currentBidderId) {
+    createNotification({
+      userId: listing.currentBidderId,
+      type: 'AUCTION_CLOSING_SOON',
+      message: `The auction for "${listing.title}" is closing soon. Consider placing your final bid before the timer ends.`,
+      relatedListingId: listing.id,
+      relatedUserId: listing.sellerId,
+      dedupeKey: `closing-soon:bidder:${listing.id}:${listing.currentBidderId}`,
+    });
+  }
+
+  updateListing(listing.id, { lastClosingSoonNotifiedAt: new Date().toISOString() });
+  return true;
 };
 
 const resolveAutoBidsForListingLocked = (listingId) => {
@@ -371,6 +405,17 @@ const processBid = async ({ listingId, bidderId, amount }) => {
       ],
     });
 
+    if (previousBidderId && previousBidderId !== bidderId) {
+      createNotification({
+        userId: previousBidderId,
+        type: 'HIGHER_BID',
+        message: `A higher competing bid was placed on "${listing.title}".`,
+        relatedListingId: listing.id,
+        relatedUserId: bidderId,
+        dedupeKey: `higher-bid:${listing.id}:${previousBidderId}`,
+      });
+    }
+
     if (extensionTarget && extensionTarget !== listing.closingAt) {
       createNotification({
         userId: listing.sellerId,
@@ -378,6 +423,7 @@ const processBid = async ({ listingId, bidderId, amount }) => {
         message: `The auction for "${listing.title}" was extended by a final-minute bid and will now close in 60 seconds.`,
         relatedListingId: listing.id,
         relatedUserId: bidderId,
+        dedupeKey: `auction-extended:${listing.id}`,
       });
       emitAuctionUpdate(updated);
     }
@@ -388,6 +434,7 @@ const processBid = async ({ listingId, bidderId, amount }) => {
       message: `A new valid bid of ₹${bidValue} was placed on ${listing.title}.`,
       relatedListingId: listing.id,
       relatedUserId: bidderId,
+      dedupeKey: `new-bid:${listing.id}:${bidderId}:${bidValue}`,
     });
 
     notifyAutoBidStatus(updated, previousBidderId);
@@ -410,6 +457,7 @@ const closeExpiredAuctions = () => {
     }
 
     if (listing.status !== 'ACTIVE') return;
+    notifyClosingSoonIfDue(listing);
     if (new Date(listing.closingAt).getTime() > now) return;
 
     const existingSale = getSaleByListingId(listing.id);
@@ -424,7 +472,7 @@ const closeExpiredAuctions = () => {
     if (!highestBid) {
       const updated = updateListing(listing.id, { status: 'UNSOLD' });
       emitAuctionUpdate(updated);
-      createNotification({ userId: listing.sellerId, type: 'AUCTION_CLOSED', message: `Your listing "${listing.title}" closed without bids and is marked unsold.`, relatedListingId: listing.id });
+      createNotification({ userId: listing.sellerId, type: 'AUCTION_CLOSED', message: `Your listing "${listing.title}" closed without bids and is marked unsold.`, relatedListingId: listing.id, dedupeKey: `auction-closed:${listing.id}` });
       affected.push(listing.id);
       return;
     }
@@ -456,12 +504,15 @@ const closeExpiredAuctions = () => {
     });
     emitAuctionUpdate(updated);
 
+    notifyClosingSoonIfDue(listing);
+
     createNotification({
       userId: listing.sellerId,
       type: 'PROVISIONAL_WIN',
       message: `The provisional winning bid for "${listing.title}" is ₹${highestBid.amount}. Review and approve or reject it.`,
       relatedListingId: listing.id,
       relatedUserId: highestBid.bidderId,
+      dedupeKey: `provisional-win:seller:${listing.id}`,
     });
 
     createNotification({
@@ -470,6 +521,7 @@ const closeExpiredAuctions = () => {
       message: `You are the provisional winner of "${listing.title}". Please wait for the seller's decision.`,
       relatedListingId: listing.id,
       relatedUserId: listing.sellerId,
+      dedupeKey: `provisional-win:buyer:${listing.id}:${highestBid.bidderId}`,
     });
 
     affected.push({ listingId: listing.id, saleId: sale.id });
@@ -521,6 +573,15 @@ const approveWinner = ({ listingId, sellerId, approved }) => {
       message: `The seller approved your bid for "${listing.title}". Please complete the handover plan.`,
       relatedListingId: listing.id,
       relatedUserId: sellerId,
+      dedupeKey: `sale-approved:${listing.id}:${listing.provisionalWinnerId}`,
+    });
+    createNotification({
+      userId: sellerId,
+      type: 'BID_ACCEPTED',
+      message: `You accepted the winning bid for "${listing.title}".`,
+      relatedListingId: listing.id,
+      relatedUserId: listing.provisionalWinnerId,
+      dedupeKey: `bid-accepted:${listing.id}:${sellerId}`,
     });
   } else {
     createNotification({
@@ -529,6 +590,15 @@ const approveWinner = ({ listingId, sellerId, approved }) => {
       message: `The seller rejected the provisional sale for "${listing.title}". The item remains available for new bids or review.`,
       relatedListingId: listing.id,
       relatedUserId: sellerId,
+      dedupeKey: `sale-rejected:${listing.id}:${listing.provisionalWinnerId}`,
+    });
+    createNotification({
+      userId: sellerId,
+      type: 'BID_REJECTED',
+      message: `You rejected the provisional bid for "${listing.title}".`,
+      relatedListingId: listing.id,
+      relatedUserId: listing.provisionalWinnerId,
+      dedupeKey: `bid-rejected:${listing.id}:${sellerId}`,
     });
   }
 
@@ -549,4 +619,5 @@ module.exports = {
   processBid,
   closeExpiredAuctions,
   approveWinner,
+  notifyClosingSoonIfDue,
 };
