@@ -96,6 +96,11 @@ const closeExpiredAuctions = () => {
     if (listing.status !== 'ACTIVE') return;
     if (new Date(listing.closingAt).getTime() > now) return;
 
+    const existingSale = getSaleByListingId(listing.id);
+    if (existingSale && existingSale.status === 'PENDING_APPROVAL') {
+      return;
+    }
+
     const highestBid = listing.bidHistory.length
       ? [...listing.bidHistory].sort((a, b) => Number(b.amount) - Number(a.amount))[0]
       : null;
@@ -104,6 +109,16 @@ const closeExpiredAuctions = () => {
       updateListing(listing.id, { status: 'UNSOLD' });
       createNotification({ userId: listing.sellerId, type: 'AUCTION_CLOSED', message: `Your listing "${listing.title}" closed without bids and is marked unsold.`, relatedListingId: listing.id });
       affected.push(listing.id);
+      return;
+    }
+
+    if (existingSale) {
+      updateListing(listing.id, {
+        status: 'PENDING_APPROVAL',
+        provisionalWinnerId: highestBid.bidderId,
+        sellerDecision: 'pending',
+      });
+      affected.push({ listingId: listing.id, saleId: existingSale.id });
       return;
     }
 
