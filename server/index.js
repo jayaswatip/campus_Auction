@@ -11,6 +11,7 @@ const authRoutes = require('./routes/auth');
 const listingRoutes = require('./routes/listings');
 const bidRoutes = require('./routes/bids');
 const autoBidRoutes = require('./routes/autoBids');
+const assistantRoutes = require('./routes/assistant');
 const notificationRoutes = require('./routes/notifications');
 const sellerRoutes = require('./routes/seller');
 
@@ -37,6 +38,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/listings', listingRoutes);
 app.use('/api/listings', bidRoutes);
 app.use('/api/listings', autoBidRoutes);
+app.use('/api/assistant', assistantRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/seller', sellerRoutes);
 
