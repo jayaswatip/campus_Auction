@@ -194,15 +194,16 @@ describe('CampusBid API', () => {
         condition: 'Excellent',
         startingPrice: 1800,
         minimumIncrement: 150,
-        closingAt: new Date(Date.now() - 1000).toISOString(),
+        closingAt: new Date(Date.now() + 600000).toISOString(),
       });
 
     const rejectItem = rejectedListing.body.listing;
-    await request(app)
+    const validRejectBid = await request(app)
       .post(`/api/listings/${rejectItem.id}/bid`)
       .set('Authorization', `Bearer ${buyer.token}`)
       .send({ amount: 2100 });
 
+    expect(validRejectBid.status).toBe(201);
     updateListing(rejectItem.id, { closingAt: new Date(Date.now() - 1000).toISOString() });
     closeExpiredAuctions();
 
