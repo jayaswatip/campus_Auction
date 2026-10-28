@@ -5,7 +5,7 @@ const http = require('http');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const { Server } = require('socket.io');
-const { getUserById, getAllListings, initializeDatabase } = require('./store');
+const { getUserById, getAllListings, initializeDatabase, setTransactionSupport } = require('./store');
 const { closeExpiredAuctions } = require('./services/auctionService');
 const authRoutes = require('./routes/auth');
 const listingRoutes = require('./routes/listings');
@@ -158,16 +158,16 @@ const startServer = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI);
     const topology = await mongoose.connection.db.admin().command({ hello: 1 });
-    if (!topology.setName && topology.msg !== 'isdbgrid') {
-      throw new Error('MongoDB must be deployed as a replica set or mongos to support atomic auction operations.');
+    const supportsTransactions = Boolean(topology.setName || topology.msg === 'isdbgrid');
+    setTransactionSupport(supportsTransactions);
+    if (!supportsTransactions) {
+      console.warn('MongoDB is running standalone; multi-document auction operations will not be transactional.');
     }
     await initializeDatabase();
   } catch (error) {
+    setTransactionSupport(false);
     await mongoose.disconnect().catch(() => {});
-    const message = error.message.includes('replica set or mongos')
-      ? error.message
-      : `MongoDB startup failed (${error.name}). Check the private MONGO_URI, network access, and database permissions.`;
-    throw new Error(message);
+    throw new Error(`MongoDB startup failed (${error.name}). Check the private MONGO_URI, network access, and database permissions.`);
   }
 
   startBackgroundJobs();

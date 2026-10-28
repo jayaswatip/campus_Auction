@@ -10,7 +10,17 @@ const state = {
   savedSearches: [],
 };
 
+let transactionsSupported = false;
+
 const isDatabaseConnected = () => mongoose.connection.readyState === 1;
+const setTransactionSupport = (supported) => {
+  transactionsSupported = Boolean(supported);
+};
+const runInTransaction = (callback) => (
+  transactionsSupported
+    ? mongoose.connection.transaction(callback)
+    : callback(null)
+);
 const models = () => ({
   User: require('./models/User'),
   Listing: require('./models/Listing'),
@@ -349,7 +359,7 @@ const updateListing = (listingId, changes) => {
         id: bid.id || uid('bid'),
         createdAt: new Date(bid.createdAt),
       }));
-      return mongoose.connection.transaction(async (session) => {
+      return runInTransaction(async (session) => {
         const document = await Listing.findOneAndUpdate(
           { id: listingId },
           { $set: update, $inc: { __v: 1 } },
@@ -384,7 +394,7 @@ const updateListing = (listingId, changes) => {
 
 const placeBidAtomically = async ({ listingId, bidderId, amount, now, extensionWindowMs, extensionLengthMs }) => {
   const { Listing, Bid, AutoBid } = models();
-  return mongoose.connection.transaction(async (session) => {
+  return runInTransaction(async (session) => {
     const listing = await Listing.findOne({ id: listingId }).session(session);
     if (!listing) {
       const error = new Error('Listing not found.');
@@ -498,7 +508,7 @@ const placeBidAtomically = async ({ listingId, bidderId, amount, now, extensionW
 
 const closeExpiredListingAtomically = async (listingId, now = new Date()) => {
   const { Listing, Sale } = models();
-  return mongoose.connection.transaction(async (session) => {
+  return runInTransaction(async (session) => {
     const listing = await Listing.findOne({ id: listingId }).session(session);
     if (!listing || listing.status !== 'ACTIVE' || new Date(listing.closingAt).getTime() > new Date(now).getTime()) {
       return null;
@@ -558,7 +568,7 @@ const closeExpiredListingAtomically = async (listingId, now = new Date()) => {
 
 const decideSaleAtomically = async ({ listingId, sellerId, approved }) => {
   const { Listing, Sale } = models();
-  return mongoose.connection.transaction(async (session) => {
+  return runInTransaction(async (session) => {
     const listing = await Listing.findOne({ id: listingId }).session(session);
     if (!listing) return null;
     if (listing.sellerId !== sellerId) {
@@ -617,7 +627,7 @@ const createBid = ({ listingId, bidderId, amount }) => {
 
   if (isDatabaseConnected()) {
     const { Listing, Bid } = models();
-    return mongoose.connection.transaction(async (session) => {
+    return runInTransaction(async (session) => {
       const listing = await Listing.findOne({ id: listingId }).session(session);
       if (!listing) return null;
       listing.bidHistory.push(bid);
@@ -781,7 +791,7 @@ const updateSaleWithNotification = async (saleId, changes, notification) => {
   }
 
   const { Sale } = models();
-  return mongoose.connection.transaction(async (session) => {
+  return runInTransaction(async (session) => {
     const sale = await Sale.findOne({ id: saleId }).session(session);
     if (!sale) return null;
     Object.assign(sale, changes, { updatedAt: new Date() });
@@ -941,6 +951,7 @@ module.exports = {
   state,
   uid,
   isDatabaseConnected,
+  setTransactionSupport,
   initializeDatabase,
   placeBidAtomically,
   closeExpiredListingAtomically,

@@ -38,7 +38,7 @@ For MongoDB Atlas, use the connection string from your Atlas cluster in `MONGO_U
 http://localhost:5000/api/health
 ```
 
-The backend persists users, listings and bid history, bids, sales, automatic-bid instructions, notifications, and saved searches in MongoDB. Existing Mongo documents without the application's string `id` field are assigned their existing Mongo `_id` as the string ID during startup; existing records are retained. Startup creates required indexes and initializes the original demo records with upserts so restarts do not create duplicates. Multi-document auction operations use MongoDB transactions, so use an Atlas replica set (Atlas clusters satisfy this requirement).
+The backend persists users, listings and bid history, bids, sales, automatic-bid instructions, notifications, and saved searches in MongoDB. Existing Mongo documents without the application's string `id` field are assigned their existing Mongo `_id` as the string ID during startup; existing records are retained. Startup creates required indexes and initializes the original demo records with upserts so restarts do not create duplicates. MongoDB replica sets and Atlas clusters use transactions for multi-document auction operations. A standalone local MongoDB server can also run the app, but those operations are not transactional; use a replica set for atomicity, especially with concurrent users.
 
 ## Validation
 
