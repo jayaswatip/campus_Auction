@@ -6,6 +6,7 @@ const state = {
   listings: [],
   notifications: [],
   sales: [],
+  autoBids: [],
 };
 
 const persistListing = (listing) => {
@@ -42,6 +43,7 @@ const resetState = () => {
   state.listings = [];
   state.notifications = [];
   state.sales = [];
+  state.autoBids = [];
   ensureSeedData();
 };
 
@@ -221,6 +223,41 @@ const updateSale = (saleId, changes) => {
   return sale;
 };
 
+const createAutoBid = ({ listingId, buyerId, maxAmount, active = true, confirmed = false }) => {
+  const instruction = {
+    id: uid('autobid'),
+    listingId,
+    buyerId,
+    maxAmount: Number(maxAmount),
+    active: Boolean(active),
+    confirmed: Boolean(confirmed),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  state.autoBids.push(instruction);
+  return instruction;
+};
+
+const getAutoBidsForListing = (listingId) => state.autoBids.filter((instruction) => instruction.listingId === listingId);
+const getAutoBidForListingAndBuyer = (listingId, buyerId) => state.autoBids.find((instruction) => instruction.listingId === listingId && instruction.buyerId === buyerId) || null;
+const getAutoBidsForUser = (buyerId) => state.autoBids.filter((instruction) => instruction.buyerId === buyerId);
+
+const updateAutoBid = (instructionId, changes) => {
+  const instruction = state.autoBids.find((item) => item.id === instructionId);
+  if (!instruction) return null;
+
+  Object.assign(instruction, changes, { updatedAt: new Date().toISOString() });
+  return instruction;
+};
+
+const deleteAutoBid = (instructionId) => {
+  const index = state.autoBids.findIndex((item) => item.id === instructionId);
+  if (index === -1) return null;
+  const [instruction] = state.autoBids.splice(index, 1);
+  return instruction;
+};
+
 ensureSeedData();
 
 module.exports = {
@@ -241,6 +278,12 @@ module.exports = {
   getSalesForUser,
   getSaleByListingId,
   updateSale,
+  createAutoBid,
+  getAutoBidsForListing,
+  getAutoBidForListingAndBuyer,
+  getAutoBidsForUser,
+  updateAutoBid,
+  deleteAutoBid,
   ensureSeedData,
   resetState,
 };

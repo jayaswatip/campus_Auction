@@ -10,6 +10,7 @@ const { closeExpiredAuctions } = require('./services/auctionService');
 const authRoutes = require('./routes/auth');
 const listingRoutes = require('./routes/listings');
 const bidRoutes = require('./routes/bids');
+const autoBidRoutes = require('./routes/autoBids');
 const notificationRoutes = require('./routes/notifications');
 const sellerRoutes = require('./routes/seller');
 
@@ -35,6 +36,7 @@ app.use(express.json({ limit: '5mb' }));
 app.use('/api/auth', authRoutes);
 app.use('/api/listings', listingRoutes);
 app.use('/api/listings', bidRoutes);
+app.use('/api/listings', autoBidRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/seller', sellerRoutes);
 

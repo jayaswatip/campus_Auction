@@ -216,6 +216,202 @@ describe('CampusBid API', () => {
     expect(rejection.body.listing.status).toBe('CANCELLED');
   });
 
+  test('requires explicit confirmation before activating automatic bidding and allows the buyer to manage it', async () => {
+    const seller = await createStudent('Ira Banerjee', 'ira.banerjee@campus.edu', 'password123');
+    const buyer = await createStudent('Nikhil Roy', 'nikhil.roy@campus.edu', 'password123');
+
+    const listingResponse = await request(app)
+      .post('/api/listings')
+      .set('Authorization', `Bearer ${seller.token}`)
+      .send({
+        title: 'Wireless mouse',
+        category: 'Electronics',
+        description: 'Ergonomic and reliable for daily study sessions.',
+        condition: 'Good',
+        startingPrice: 1500,
+        minimumIncrement: 100,
+        closingAt: new Date(Date.now() + 600000).toISOString(),
+      });
+
+    const listing = listingResponse.body.listing;
+    const pendingActivation = await request(app)
+      .post(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${buyer.token}`)
+      .send({ maxAmount: 2500 });
+    expect(pendingActivation.status).toBe(400);
+
+    const activation = await request(app)
+      .post(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${buyer.token}`)
+      .send({ maxAmount: 2500, confirmed: true });
+    expect(activation.status).toBe(201);
+    expect(activation.body.instruction.confirmed).toBe(true);
+    expect(activation.body.instruction.active).toBe(true);
+
+    const viewOwnInstruction = await request(app)
+      .get(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${buyer.token}`);
+    expect(viewOwnInstruction.status).toBe(200);
+    expect(viewOwnInstruction.body.instruction.maxAmount).toBe(2500);
+
+    const sellerView = await request(app)
+      .get(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${seller.token}`);
+    expect(sellerView.status).toBe(403);
+
+    const update = await request(app)
+      .patch(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${buyer.token}`)
+      .send({ maxAmount: 2700, active: true, confirmed: true });
+    expect(update.status).toBe(200);
+    expect(update.body.instruction.maxAmount).toBe(2700);
+
+    const deactivate = await request(app)
+      .delete(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${buyer.token}`);
+    expect(deactivate.status).toBe(200);
+    expect(deactivate.body.instruction.active).toBe(false);
+  });
+
+  test('uses deterministic tie-breaking and respects each auto bidder maximum', async () => {
+    const seller = await createStudent('Rhea Verma', 'rhea.verma@campus.edu', 'password123');
+    const buyerA = await createStudent('Aakash Das', 'aakash.das@campus.edu', 'password123');
+    const buyerB = await createStudent('Sana Iqbal', 'sana.iqbal@campus.edu', 'password123');
+    const rival = await createStudent('Nate Morris', 'nate.morris@campus.edu', 'password123');
+
+    const listingResponse = await request(app)
+      .post('/api/listings')
+      .set('Authorization', `Bearer ${seller.token}`)
+      .send({
+        title: 'Portable speaker',
+        category: 'Electronics',
+        description: 'Clear sound and strong battery life.',
+        condition: 'Very Good',
+        startingPrice: 3000,
+        minimumIncrement: 200,
+        closingAt: new Date(Date.now() + 600000).toISOString(),
+      });
+
+    const listing = listingResponse.body.listing;
+    const firstAutoBid = await request(app)
+      .post(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${buyerA.token}`)
+      .send({ maxAmount: 4200, confirmed: true });
+    expect(firstAutoBid.status).toBe(201);
+
+    const secondAutoBid = await request(app)
+      .post(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${buyerB.token}`)
+      .send({ maxAmount: 4200, confirmed: true });
+    expect(secondAutoBid.status).toBe(201);
+
+    const rivalBid = await request(app)
+      .post(`/api/listings/${listing.id}/bid`)
+      .set('Authorization', `Bearer ${rival.token}`)
+      .send({ amount: 3600 });
+    expect(rivalBid.status).toBe(201);
+
+    const persisted = getListingById(listing.id);
+    expect(persisted.currentBid).toBe(3800);
+    expect(persisted.currentBidderId).toBe(buyerA.user.id);
+
+    const autoBidByEveryone = await request(app)
+      .post(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${buyerA.token}`)
+      .send({ maxAmount: 3800, confirmed: true });
+    expect(autoBidByEveryone.status).toBe(201);
+
+    const withLowerMax = await request(app)
+      .post(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${buyerB.token}`)
+      .send({ maxAmount: 3700, confirmed: true });
+    expect(withLowerMax.status).toBe(201);
+
+    const publicRaise = await request(app)
+      .post(`/api/listings/${listing.id}/bid`)
+      .set('Authorization', `Bearer ${rival.token}`)
+      .send({ amount: 4000 });
+    expect(publicRaise.status).toBe(201);
+
+    const finalListing = getListingById(listing.id);
+    expect(finalListing.currentBid).toBe(4000);
+    expect(finalListing.currentBid).toBeLessThanOrEqual(4200);
+    expect(finalListing.currentBidderId).toBe(rival.user.id);
+  });
+
+  test('does not allow closed auctions or unauthorized automatic-bidding updates', async () => {
+    const seller = await createStudent('Mihir Shah', 'mihir.shah@campus.edu', 'password123');
+    const buyer = await createStudent('Pooja Sen', 'pooja.sen@campus.edu', 'password123');
+    const otherBuyer = await createStudent('Leo Martin', 'leo.martin@campus.edu', 'password123');
+
+    const listingResponse = await request(app)
+      .post('/api/listings')
+      .set('Authorization', `Bearer ${seller.token}`)
+      .send({
+        title: 'Desk lamp',
+        category: 'Furniture',
+        description: 'Bright lamp for evening study.',
+        condition: 'Excellent',
+        startingPrice: 1200,
+        minimumIncrement: 100,
+        closingAt: new Date(Date.now() - 1000).toISOString(),
+      });
+
+    const listing = listingResponse.body.listing;
+    const denied = await request(app)
+      .post(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${buyer.token}`)
+      .send({ maxAmount: 2500, confirmed: true });
+    expect(denied.status).toBe(400);
+
+    const otherUserPatch = await request(app)
+      .patch(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${otherBuyer.token}`)
+      .send({ maxAmount: 3000, confirmed: true });
+    expect(otherUserPatch.status).toBe(404);
+  });
+
+  test('extends competing automatic bids without exceeding the buyer maximum', async () => {
+    const seller = await createStudent('Aisha Bhatia', 'aisha.bhatia@campus.edu', 'password123');
+    const buyerA = await createStudent('Rajat Singhal', 'rajat.singhal@campus.edu', 'password123');
+    const buyerB = await createStudent('Yashika Rao', 'yashika.rao@campus.edu', 'password123');
+    const otherBuyer = await createStudent('Dev Nair', 'dev.nair@campus.edu', 'password123');
+
+    const listingResponse = await request(app)
+      .post('/api/listings')
+      .set('Authorization', `Bearer ${seller.token}`)
+      .send({
+        title: 'Camping chair',
+        category: 'Outdoors',
+        description: 'Lightweight and sturdy for weekend trips.',
+        condition: 'Good',
+        startingPrice: 1000,
+        minimumIncrement: 100,
+        closingAt: new Date(Date.now() + 600000).toISOString(),
+      });
+
+    const listing = listingResponse.body.listing;
+    await request(app)
+      .post(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${buyerA.token}`)
+      .send({ maxAmount: 1800, confirmed: true });
+    await request(app)
+      .post(`/api/listings/${listing.id}/auto-bid`)
+      .set('Authorization', `Bearer ${buyerB.token}`)
+      .send({ maxAmount: 1600, confirmed: true });
+
+    const firstBid = await request(app)
+      .post(`/api/listings/${listing.id}/bid`)
+      .set('Authorization', `Bearer ${otherBuyer.token}`)
+      .send({ amount: 1200 });
+    expect(firstBid.status).toBe(201);
+
+    const afterManualBid = getListingById(listing.id);
+    expect(afterManualBid.currentBidderId).toBe(buyerA.user.id);
+    expect(afterManualBid.currentBid).toBe(1300);
+    expect(afterManualBid.currentBid).toBeLessThanOrEqual(1800);
+  });
+
   test('extends a valid bid in the final 30 seconds by 60 seconds and rejects late invalid bids', async () => {
     const seller = await createStudent('Aman Singh', 'aman.test@campus.edu', 'password123');
     const buyer = await createStudent('Ira Sen', 'ira.test@campus.edu', 'password123');
