@@ -7,6 +7,14 @@ const state = {
   sales: [],
 };
 
+const resetState = () => {
+  state.users = [];
+  state.listings = [];
+  state.notifications = [];
+  state.sales = [];
+  ensureSeedData();
+};
+
 const ensureSeedData = () => {
   if (state.users.length > 0 || state.listings.length > 0) {
     return;
@@ -202,4 +210,5 @@ module.exports = {
   getSaleByListingId,
   updateSale,
   ensureSeedData,
+  resetState,
 };
