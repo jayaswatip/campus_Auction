@@ -1,7 +1,7 @@
-const request = require('supertest');
+﻿const request = require('supertest');
 const { app } = require('../index');
-const { state, updateListing, resetState } = require('../store');
-const { closeExpiredAuctions } = require('../services/auctionService');
+const { state, updateListing, resetState, getListingById } = require('../store');
+const { closeExpiredAuctions, processBid } = require('../services/auctionService');
 
 beforeEach(() => {
   resetState();
@@ -214,5 +214,172 @@ describe('CampusBid API', () => {
 
     expect(rejection.status).toBe(200);
     expect(rejection.body.listing.status).toBe('CANCELLED');
+  });
+
+  test('extends a valid bid in the final 30 seconds by 60 seconds and rejects late invalid bids', async () => {
+    const seller = await createStudent('Aman Singh', 'aman.test@campus.edu', 'password123');
+    const buyer = await createStudent('Ira Sen', 'ira.test@campus.edu', 'password123');
+
+    const listingResponse = await request(app)
+      .post('/api/listings')
+      .set('Authorization', `Bearer ${seller.token}`)
+      .send({
+        title: 'Desk lamp',
+        category: 'Furniture',
+        description: 'Bright LED desk lamp',
+        condition: 'Good',
+        startingPrice: 1500,
+        minimumIncrement: 100,
+        closingAt: new Date(Date.now() + 31 * 1000).toISOString(),
+      });
+
+    const listing = listingResponse.body.listing;
+    const invalidBid = await request(app)
+      .post(`/api/listings/${listing.id}/bid`)
+      .set('Authorization', `Bearer ${buyer.token}`)
+      .send({ amount: 1400 });
+    expect(invalidBid.status).toBe(400);
+    expect(new Date(getListingById(listing.id).closingAt).getTime()).toBe(new Date(listing.closingAt).getTime());
+
+    const closingAt = new Date(Date.now() + 30 * 1000).toISOString();
+    updateListing(listing.id, { closingAt });
+
+    const validBid = await request(app)
+      .post(`/api/listings/${listing.id}/bid`)
+      .set('Authorization', `Bearer ${buyer.token}`)
+      .send({ amount: 1700 });
+
+    expect(validBid.status).toBe(201);
+    const updated = getListingById(listing.id);
+    expect(updated.currentBid).toBe(1700);
+    expect(new Date(updated.closingAt).getTime() - Date.now()).toBeGreaterThanOrEqual(59 * 1000);
+  });
+
+  test('does not extend a bid when it lands more than 30 seconds before close', async () => {
+    const seller = await createStudent('Nisha Roy', 'nisha.test@campus.edu', 'password123');
+    const buyer = await createStudent('Dev Patel', 'dev.test@campus.edu', 'password123');
+
+    const listingResponse = await request(app)
+      .post('/api/listings')
+      .set('Authorization', `Bearer ${seller.token}`)
+      .send({
+        title: 'Calculator',
+        category: 'Stationery',
+        description: 'Scientific calculator in great shape',
+        condition: 'Excellent',
+        startingPrice: 800,
+        minimumIncrement: 50,
+        closingAt: new Date(Date.now() + 31 * 1000).toISOString(),
+      });
+
+    const listing = listingResponse.body.listing;
+    const response = await request(app)
+      .post(`/api/listings/${listing.id}/bid`)
+      .set('Authorization', `Bearer ${buyer.token}`)
+      .send({ amount: 900 });
+
+    expect(response.status).toBe(201);
+    const saved = getListingById(listing.id);
+    expect(new Date(saved.closingAt).getTime()).toBe(new Date(listing.closingAt).getTime());
+  });
+
+  test('blocks bids after auction closure and does not extend the expired auction', async () => {
+    const seller = await createStudent('Priyanka Jain', 'priyanka.test@campus.edu', 'password123');
+    const buyer = await createStudent('Ritwik Rao', 'ritwik.test@campus.edu', 'password123');
+
+    const listingResponse = await request(app)
+      .post('/api/listings')
+      .set('Authorization', `Bearer ${seller.token}`)
+      .send({
+        title: 'Portable speaker',
+        category: 'Electronics',
+        description: 'Small speaker with rich bass',
+        condition: 'Good',
+        startingPrice: 1800,
+        minimumIncrement: 100,
+        closingAt: new Date(Date.now() - 1000).toISOString(),
+      });
+
+    const listing = listingResponse.body.listing;
+    const response = await request(app)
+      .post(`/api/listings/${listing.id}/bid`)
+      .set('Authorization', `Bearer ${buyer.token}`)
+      .send({ amount: 2000 });
+
+    expect(response.status).toBe(400);
+    expect(response.body.message).toMatch(/closed|no longer accepting/i);
+    const saved = getListingById(listing.id);
+    expect(saved.status).toBe('ACTIVE');
+    expect(new Date(saved.closingAt).getTime()).toBeLessThan(Date.now());
+  });
+
+  test('allows repeated extensions for consecutive valid late bids', async () => {
+    const seller = await createStudent('Ritika Shah', 'ritika.test@campus.edu', 'password123');
+    const buyer = await createStudent('Aditya Kumar', 'aditya.test@campus.edu', 'password123');
+
+    const listingResponse = await request(app)
+      .post('/api/listings')
+      .set('Authorization', `Bearer ${seller.token}`)
+      .send({
+        title: 'Bluetooth mouse',
+        category: 'Electronics',
+        description: 'Wireless mouse, near new',
+        condition: 'Excellent',
+        startingPrice: 1200,
+        minimumIncrement: 100,
+        closingAt: new Date(Date.now() + 15 * 1000).toISOString(),
+      });
+
+    const listing = listingResponse.body.listing;
+    const first = await request(app)
+      .post(`/api/listings/${listing.id}/bid`)
+      .set('Authorization', `Bearer ${buyer.token}`)
+      .send({ amount: 1300 });
+    expect(first.status).toBe(201);
+
+    const afterFirst = getListingById(listing.id);
+    expect(new Date(afterFirst.closingAt).getTime() - Date.now()).toBeGreaterThanOrEqual(59 * 1000);
+
+    updateListing(listing.id, { closingAt: new Date(Date.now() + 15 * 1000).toISOString() });
+    const second = await request(app)
+      .post(`/api/listings/${listing.id}/bid`)
+      .set('Authorization', `Bearer ${buyer.token}`)
+      .send({ amount: 1400 });
+
+    expect(second.status).toBe(201);
+    const afterSecond = getListingById(listing.id);
+    expect(new Date(afterSecond.closingAt).getTime() - Date.now()).toBeGreaterThanOrEqual(59 * 1000);
+    expect(afterSecond.currentBid).toBe(1400);
+  });
+
+  test('handles concurrent late bids safely and keeps the auction state consistent', async () => {
+    const seller = await createStudent('Mehul Verma', 'mehul.test@campus.edu', 'password123');
+    const buyerA = await createStudent('Sana Qureshi', 'sana.test@campus.edu', 'password123');
+    const buyerB = await createStudent('Karan Malhotra', 'karan.test@campus.edu', 'password123');
+
+    const listingResponse = await request(app)
+      .post('/api/listings')
+      .set('Authorization', `Bearer ${seller.token}`)
+      .send({
+        title: 'Study chair',
+        category: 'Furniture',
+        description: 'Comfortable ergonomic chair',
+        condition: 'Good',
+        startingPrice: 2000,
+        minimumIncrement: 100,
+        closingAt: new Date(Date.now() + 20 * 1000).toISOString(),
+      });
+
+    const listing = listingResponse.body.listing;
+    const [first, second] = await Promise.all([
+      request(app).post(`/api/listings/${listing.id}/bid`).set('Authorization', `Bearer ${buyerA.token}`).send({ amount: 2100 }),
+      request(app).post(`/api/listings/${listing.id}/bid`).set('Authorization', `Bearer ${buyerB.token}`).send({ amount: 2200 }),
+    ]);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    const saved = getListingById(listing.id);
+    expect(saved.currentBid).toBe(2200);
+    expect(new Date(saved.closingAt).getTime() - Date.now()).toBeGreaterThanOrEqual(59 * 1000);
   });
 });
