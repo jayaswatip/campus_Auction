@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
+const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const { Server } = require('socket.io');
 const { getNotificationsForUser, getUserById, getAllListings } = require('./store');
@@ -20,6 +21,12 @@ const io = new Server(server, {
     credentials: true,
   },
 });
+
+if (process.env.MONGO_URI) {
+  mongoose.connect(process.env.MONGO_URI)
+    .then(() => console.log('Connected to MongoDB'))
+    .catch((error) => console.error('MongoDB connection failed:', error.message));
+}
 
 const port = process.env.PORT || 5000;
 
@@ -77,6 +84,21 @@ const emitAllAuctionUpdates = () => {
   const listings = getAllListings();
   listings.forEach((listing) => {
     io.to(`auction:${listing.id}`).emit('auction:update', { listing });
+    io.to(`auction:${listing.id}`).emit('auction:countdown', {
+      listingId: listing.id,
+      closingAt: listing.closingAt,
+      remainingMs: Math.max(0, new Date(listing.closingAt).getTime() - Date.now()),
+    });
+  });
+};
+
+global.__campusBidSocketEmitter = (listing) => {
+  if (!listing) return;
+  io.to(`auction:${listing.id}`).emit('auction:update', { listing });
+  io.to(`auction:${listing.id}`).emit('auction:countdown', {
+    listingId: listing.id,
+    closingAt: listing.closingAt,
+    remainingMs: Math.max(0, new Date(listing.closingAt).getTime() - Date.now()),
   });
 };
 

@@ -1,5 +1,36 @@
 const { getListingById, updateListing, createNotification, createSale, getSaleByListingId, updateSale } = require('../store');
 
+const LAST_MINUTE_EXTENSION_WINDOW_MS = 30 * 1000;
+const LAST_MINUTE_EXTENSION_LENGTH_MS = 60 * 1000;
+
+const getRemainingAuctionTime = (listing, now = Date.now()) => {
+  if (!listing) return 0;
+  return Math.max(0, new Date(listing.closingAt).getTime() - now);
+};
+
+const shouldExtendClosingTime = (listing, now = Date.now()) => {
+  if (!listing || listing.status !== 'ACTIVE') {
+    return false;
+  }
+
+  const remainingMs = getRemainingAuctionTime(listing, now);
+  return remainingMs > 0 && remainingMs <= LAST_MINUTE_EXTENSION_WINDOW_MS;
+};
+
+const getExtendedClosingAt = (listing, now = Date.now()) => {
+  if (!shouldExtendClosingTime(listing, now)) {
+    return listing?.closingAt || null;
+  }
+
+  return new Date(now + LAST_MINUTE_EXTENSION_LENGTH_MS).toISOString();
+};
+
+const emitAuctionUpdate = (listing) => {
+  if (global.__campusBidSocketEmitter && listing) {
+    global.__campusBidSocketEmitter(listing);
+  }
+};
+
 const withListingLock = async (listingId, callback) => {
   const key = `listing:${listingId}`;
   if (!global.__campusBidLocks) {
@@ -18,7 +49,10 @@ const withListingLock = async (listingId, callback) => {
   try {
     return await callback();
   } finally {
-    release();
+    if (release) {
+      release();
+    }
+    delete global.__campusBidLocks[key];
   }
 };
 
@@ -45,8 +79,9 @@ const processBid = async ({ listingId, bidderId, amount }) => {
       throw error;
     }
 
+    const now = Date.now();
     const closingAt = new Date(listing.closingAt).getTime();
-    if (Date.now() > closingAt) {
+    if (now > closingAt) {
       const error = new Error('The auction is closed.');
       error.statusCode = 400;
       throw error;
@@ -60,9 +95,11 @@ const processBid = async ({ listingId, bidderId, amount }) => {
       throw error;
     }
 
+    const extensionTarget = getExtendedClosingAt(listing, now);
     const updated = updateListing(listingId, {
       currentBid: bidValue,
       currentBidderId: bidderId,
+      closingAt: extensionTarget === listing.closingAt ? listing.closingAt : extensionTarget,
       bidHistory: [
         ...listing.bidHistory,
         {
@@ -74,6 +111,17 @@ const processBid = async ({ listingId, bidderId, amount }) => {
       ],
     });
 
+    if (extensionTarget && extensionTarget !== listing.closingAt) {
+      createNotification({
+        userId: listing.sellerId,
+        type: 'AUCTION_EXTENDED',
+        message: `The auction for "${listing.title}" was extended by a final-minute bid and will now close in 60 seconds.`,
+        relatedListingId: listing.id,
+        relatedUserId: bidderId,
+      });
+      emitAuctionUpdate(updated);
+    }
+
     createNotification({
       userId: listing.sellerId,
       type: 'NEW_BID',
@@ -81,6 +129,8 @@ const processBid = async ({ listingId, bidderId, amount }) => {
       relatedListingId: listing.id,
       relatedUserId: bidderId,
     });
+
+    emitAuctionUpdate(updated);
 
     return updated;
   });
@@ -93,6 +143,11 @@ const closeExpiredAuctions = () => {
   const listings = require('../store').getAllListings();
 
   listings.forEach((listing) => {
+    const lockKey = `listing:${listing.id}`;
+    if (global.__campusBidLocks && global.__campusBidLocks[lockKey]) {
+      return;
+    }
+
     if (listing.status !== 'ACTIVE') return;
     if (new Date(listing.closingAt).getTime() > now) return;
 
@@ -106,18 +161,20 @@ const closeExpiredAuctions = () => {
       : null;
 
     if (!highestBid) {
-      updateListing(listing.id, { status: 'UNSOLD' });
+      const updated = updateListing(listing.id, { status: 'UNSOLD' });
+      emitAuctionUpdate(updated);
       createNotification({ userId: listing.sellerId, type: 'AUCTION_CLOSED', message: `Your listing "${listing.title}" closed without bids and is marked unsold.`, relatedListingId: listing.id });
       affected.push(listing.id);
       return;
     }
 
     if (existingSale) {
-      updateListing(listing.id, {
+      const updated = updateListing(listing.id, {
         status: 'PENDING_APPROVAL',
         provisionalWinnerId: highestBid.bidderId,
         sellerDecision: 'pending',
       });
+      emitAuctionUpdate(updated);
       affected.push({ listingId: listing.id, saleId: existingSale.id });
       return;
     }
@@ -131,11 +188,12 @@ const closeExpiredAuctions = () => {
       status: 'PENDING_APPROVAL',
     });
 
-    updateListing(listing.id, {
+    const updated = updateListing(listing.id, {
       status: 'PENDING_APPROVAL',
       provisionalWinnerId: highestBid.bidderId,
       sellerDecision: 'pending',
     });
+    emitAuctionUpdate(updated);
 
     createNotification({
       userId: listing.sellerId,
@@ -187,10 +245,11 @@ const approveWinner = ({ listingId, sellerId, approved }) => {
   }
 
   const nextStatus = approved ? 'RESERVED' : 'REJECTED';
-  updateListing(listingId, {
+  const updated = updateListing(listingId, {
     status: approved ? 'RESERVED' : 'CANCELLED',
     sellerDecision: approved ? 'approved' : 'rejected',
   });
+  emitAuctionUpdate(updated);
 
   updateSale(sale.id, { status: nextStatus });
 
@@ -212,10 +271,15 @@ const approveWinner = ({ listingId, sellerId, approved }) => {
     });
   }
 
-  return { listing, sale };
+  return { listing: updated, sale };
 };
 
 module.exports = {
+  LAST_MINUTE_EXTENSION_WINDOW_MS,
+  LAST_MINUTE_EXTENSION_LENGTH_MS,
+  getRemainingAuctionTime,
+  shouldExtendClosingTime,
+  getExtendedClosingAt,
   processBid,
   closeExpiredAuctions,
   approveWinner,

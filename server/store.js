@@ -1,10 +1,40 @@
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 
 const state = {
   users: [],
   listings: [],
   notifications: [],
   sales: [],
+};
+
+const persistListing = (listing) => {
+  if (!listing || mongoose.connection.readyState !== 1) {
+    return null;
+  }
+
+  const ListingModel = require('./models/Listing');
+  return ListingModel.findOneAndUpdate(
+    { sellerId: listing.sellerId, title: listing.title, createdAt: listing.createdAt },
+    {
+      sellerId: listing.sellerId,
+      title: listing.title,
+      category: listing.category,
+      description: listing.description,
+      condition: listing.condition,
+      imageUrls: listing.imageUrls,
+      startingPrice: listing.startingPrice,
+      minimumIncrement: listing.minimumIncrement,
+      closingAt: listing.closingAt,
+      status: listing.status,
+      currentBid: listing.currentBid,
+      currentBidderId: listing.currentBidderId,
+      provisionalWinnerId: listing.provisionalWinnerId,
+      sellerDecision: listing.sellerDecision,
+      bidHistory: listing.bidHistory,
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  ).catch(() => null);
 };
 
 const resetState = () => {
@@ -109,6 +139,7 @@ const createListing = ({ sellerId, title, category, description, condition, imag
   };
 
   state.listings.push(listing);
+  persistListing(listing);
   return listing;
 };
 
@@ -120,6 +151,7 @@ const updateListing = (listingId, changes) => {
   if (!listing) return null;
 
   Object.assign(listing, changes, { updatedAt: new Date().toISOString() });
+  persistListing(listing);
   return listing;
 };
 
