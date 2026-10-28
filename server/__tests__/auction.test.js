@@ -1,7 +1,11 @@
 const request = require('supertest');
 const { app } = require('../index');
-const { state, updateListing } = require('../store');
+const { state, updateListing, resetState } = require('../store');
 const { closeExpiredAuctions } = require('../services/auctionService');
+
+beforeEach(() => {
+  resetState();
+});
 
 const createStudent = async (name, email, password) => {
   const response = await request(app)
